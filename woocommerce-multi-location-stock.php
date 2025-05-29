@@ -56,9 +56,7 @@ class WC_Multi_Location_Stock {
         
         add_action('init', [$this, 'init']);
         add_action('admin_menu', [$this, 'add_admin_menu'], 99);
-        add_action('admin_menu', [$this, 'ensure_wc_menu_for_location_manager'], 10);
         add_action('admin_init', [$this, 'restrict_admin_access']);
-        add_action('admin_init', [$this, 'maybe_update_capabilities']);
         add_filter('woocommerce_product_get_stock_quantity', [$this, 'get_location_stock'], 10, 2);
         add_filter('woocommerce_product_is_in_stock', [$this, 'check_location_stock'], 10, 2);
         add_action('woocommerce_check_cart_items', [$this, 'validate_cart_location']);
@@ -86,21 +84,10 @@ class WC_Multi_Location_Stock {
         // Order filters for location managers
         add_action('pre_get_posts', [$this, 'filter_orders_for_location_manager']);
         add_filter('views_edit-shop_order', [$this, 'filter_order_views']);
-        add_filter('woocommerce_order_list_table_prepare_items_query_args', [$this, 'filter_orders_query_for_location_manager']);
-    }
-    
-    public function maybe_update_capabilities() {
-        // Check if we need to update capabilities (useful after plugin update)
-        $version = get_option('wcmls_plugin_version', '0');
-        if (version_compare($version, WCMLS_VERSION, '<')) {
-            $this->update_existing_location_managers();
-            update_option('wcmls_plugin_version', WCMLS_VERSION);
-        }
     }
     
     public function activate() {
         $this->create_location_manager_role();
-        $this->update_existing_location_managers();
         $this->create_tables();
         
         // Set default options
@@ -111,39 +98,15 @@ class WC_Multi_Location_Stock {
         flush_rewrite_rules();
     }
     
-    private function update_existing_location_managers() {
-        // Update capabilities for existing location managers
-        $role = get_role('location_manager');
-        if ($role) {
-            // Add missing capabilities
-            $role->add_cap('edit_shop_order');
-            $role->add_cap('read_private_shop_orders');
-            $role->add_cap('edit_private_shop_orders');
-            $role->add_cap('edit_published_shop_orders');
-            $role->add_cap('edit_others_shop_orders');
-            $role->add_cap('view_admin_dashboard');
-        }
-    }
-    
     public function deactivate() {
-        // Optionally remove the role on deactivation
-        // remove_role('location_manager');
         flush_rewrite_rules();
     }
     
     private function create_location_manager_role() {
         $capabilities = [
             'read' => true,
-            // Order capabilities
             'edit_shop_orders' => true,
             'read_shop_order' => true,
-            'edit_shop_order' => true,
-            'read_private_shop_orders' => true,
-            'edit_private_shop_orders' => true,
-            'edit_published_shop_orders' => true,
-            'edit_others_shop_orders' => true,
-            'view_admin_dashboard' => true,
-            // Product capabilities
             'edit_products' => true,
             'edit_product' => true,
             'read_product' => true,
@@ -162,9 +125,6 @@ class WC_Multi_Location_Stock {
             'delete_product_terms' => false,
             'assign_product_terms' => true,
             'upload_files' => true,
-            // WooCommerce capabilities
-            'manage_woocommerce' => false,
-            'view_woocommerce_reports' => false,
         ];
         
         add_role('location_manager', __('Менеджер Локации', 'wc-multi-location-stock'), $capabilities);
@@ -193,115 +153,26 @@ class WC_Multi_Location_Stock {
         $this->locations = get_option('wcmls_locations', []);
     }
     
-    public function ensure_wc_menu_for_location_manager() {
-        if (current_user_can('location_manager')) {
-            global $menu;
-            
-            // Check if WooCommerce menu exists
-            $wc_menu_exists = false;
-            foreach ($menu as $item) {
-                if ($item[2] === 'woocommerce') {
-                    $wc_menu_exists = true;
-                    break;
-                }
-            }
-            
-            // If not, add it
-            if (!$wc_menu_exists) {
-                add_menu_page(
-                    'WooCommerce',
-                    'WooCommerce',
-                    'edit_shop_orders',
-                    'woocommerce',
-                    '',
-                    'dashicons-cart',
-                    55
-                );
-            }
-        }
-    }
-    
     public function add_admin_menu() {
-        // Main settings page - only for admins
-        if (current_user_can('manage_woocommerce')) {
-            add_submenu_page(
-                'woocommerce',
-                __('Multi-Location Stock', 'wc-multi-location-stock'),
-                __('Multi-Location Stock', 'wc-multi-location-stock'),
-                'manage_woocommerce',
-                'wcmls-settings',
-                [$this, 'settings_page']
-            );
-        }
+        // Main settings page
+        add_submenu_page(
+            'woocommerce',
+            __('Multi-Location Stock', 'wc-multi-location-stock'),
+            __('Multi-Location Stock', 'wc-multi-location-stock'),
+            'manage_woocommerce',
+            'wcmls-settings',
+            [$this, 'settings_page']
+        );
         
-        // Stock management page - for admins and location managers
-        if (current_user_can('edit_products')) {
-            if (current_user_can('location_manager')) {
-                // For location managers - add as top-level menu
-                add_menu_page(
-                    __('Склад', 'wc-multi-location-stock'),
-                    __('Склад', 'wc-multi-location-stock'),
-                    'edit_products',
-                    'wcmls-stock',
-                    [$this, 'stock_management_page'],
-                    'dashicons-store',
-                    56
-                );
-            } else {
-                // For admins - add as submenu
-                add_submenu_page(
-                    'woocommerce',
-                    __('Склад', 'wc-multi-location-stock'),
-                    __('Склад', 'wc-multi-location-stock'),
-                    'edit_products',
-                    'wcmls-stock',
-                    [$this, 'stock_management_page']
-                );
-            }
-        }
-        
-        // Ensure Orders menu is visible for location managers
-        if (current_user_can('location_manager')) {
-            // Check if HPOS is enabled
-            if (class_exists('\Automattic\WooCommerce\Utilities\OrderUtil') && 
-                \Automattic\WooCommerce\Utilities\OrderUtil::custom_orders_table_usage_is_enabled()) {
-                // HPOS enabled - orders are at wc-orders
-                add_submenu_page(
-                    'woocommerce',
-                    __('Заказы', 'woocommerce'),
-                    __('Заказы', 'woocommerce'),
-                    'edit_shop_orders',
-                    'wc-orders',
-                    [WC_Admin_Menus::class, 'orders_menu']
-                );
-            } else {
-                // Legacy orders
-                add_submenu_page(
-                    'woocommerce',
-                    __('Заказы', 'woocommerce'),
-                    __('Заказы', 'woocommerce'),
-                    'edit_shop_orders',
-                    'edit.php?post_type=shop_order'
-                );
-            }
-            
-            // Ensure Products menu is visible
-            add_submenu_page(
-                'woocommerce',
-                __('Товары', 'woocommerce'),
-                __('Товары', 'woocommerce'),
-                'edit_products',
-                'edit.php?post_type=product'
-            );
-            
-            add_submenu_page(
-                'woocommerce',
-                __('Добавить товар', 'woocommerce'),
-                __('Добавить товар', 'woocommerce'),
-                'edit_products',
-                'post-new.php?post_type=product'
-            );
-        }
+        // Stock management page
+        add_submenu_page(
+            'woocommerce',
+            __('Склад', 'wc-multi-location-stock'),
+            __('Склад', 'wc-multi-location-stock'),
+            'edit_products',
+            'wcmls-stock',
+            [$this, 'stock_management_page']
+        );
     }
     
     public function restrict_admin_access() {
@@ -314,28 +185,14 @@ class WC_Multi_Location_Stock {
         $current_page = isset($_GET['page']) ? $_GET['page'] : '';
         
         // Allowed pages for location manager
-        $allowed_pages = ['edit.php', 'post.php', 'post-new.php', 'upload.php', 'profile.php', 'admin.php'];
+        $allowed_pages = ['edit.php', 'post.php', 'post-new.php', 'upload.php', 'profile.php'];
         $allowed_post_types = ['product', 'shop_order'];
-        $allowed_wc_pages = ['wcmls-stock', 'wc-orders', 'wc-orders--shop_order'];
-        $allowed_general_pages = ['wcmls-stock'];
-        
-        // Allow access to basic pages
-        if (!in_array($pagenow, $allowed_pages)) {
-            wp_die(__('У вас нет прав для доступа к этой странице.', 'wc-multi-location-stock'));
-        }
+        $allowed_wc_pages = ['wcmls-stock'];
         
         // Check if accessing WooCommerce pages
-        if ($pagenow === 'admin.php' && $current_page) {
-            // Allow specific WC pages
-            if (in_array($current_page, $allowed_wc_pages)) {
-                return;
-            }
-            
-            // Block other WC pages
+        if ($pagenow === 'admin.php' && $current_page && !in_array($current_page, $allowed_wc_pages)) {
             if (strpos($current_page, 'wc-') === 0 || strpos($current_page, 'woocommerce') !== false) {
-                if ($current_page !== 'wcmls-stock') {
-                    wp_die(__('У вас нет прав для доступа к этой странице.', 'wc-multi-location-stock'));
-                }
+                wp_die(__('У вас нет прав для доступа к этой странице.', 'wc-multi-location-stock'));
             }
         }
         
@@ -344,10 +201,6 @@ class WC_Multi_Location_Stock {
             $post_type = isset($_GET['post_type']) ? $_GET['post_type'] : '';
             if (!$post_type && isset($_GET['post'])) {
                 $post_type = get_post_type($_GET['post']);
-            }
-            
-            if (!$post_type && $pagenow === 'edit.php') {
-                $post_type = 'post';
             }
             
             if ($post_type && !in_array($post_type, $allowed_post_types)) {
@@ -364,29 +217,20 @@ class WC_Multi_Location_Stock {
             // Remove main menu items
             $restricted_menus = [
                 'index.php', 'edit-comments.php', 'themes.php', 'plugins.php',
-                'users.php', 'tools.php', 'options-general.php', 'edit.php'
+                'users.php', 'tools.php', 'options-general.php'
             ];
             
             foreach ($restricted_menus as $menu) {
                 remove_menu_page($menu);
             }
             
-            // Remove specific WooCommerce submenus but keep Orders and Stock
+            // Remove WooCommerce submenus except allowed ones
             remove_submenu_page('woocommerce', 'wc-admin');
             remove_submenu_page('woocommerce', 'wc-reports');
             remove_submenu_page('woocommerce', 'wc-settings');
             remove_submenu_page('woocommerce', 'wc-status');
             remove_submenu_page('woocommerce', 'wc-addons');
             remove_submenu_page('woocommerce', 'wcmls-settings');
-            
-            // Ensure WooCommerce main menu is visible but only with allowed items
-            global $menu;
-            foreach ($menu as $key => $item) {
-                if ($item[2] === 'woocommerce') {
-                    $menu[$key][1] = 'edit_shop_orders';
-                    break;
-                }
-            }
         }, 999);
     }
     
@@ -966,22 +810,6 @@ class WC_Multi_Location_Stock {
             unset($views['trash']);
         }
         return $views;
-    }
-    
-    public function filter_orders_query_for_location_manager($args) {
-        if (!current_user_can('location_manager')) {
-            return $args;
-        }
-        
-        $user_location = $this->get_user_location(get_current_user_id());
-        if (!$user_location || !isset($this->locations[$user_location])) {
-            return $args;
-        }
-        
-        $location_name = $this->locations[$user_location]['name'];
-        $args['billing_city'] = $location_name;
-        
-        return $args;
     }
 }
 
