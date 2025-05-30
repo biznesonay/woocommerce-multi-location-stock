@@ -3,7 +3,7 @@
  * Plugin Name: WooCommerce Multi-Location Stock
  * Plugin URI: https://biznesonay.kz/
  * Description: Управление складом по локациям для WooCommerce с ролью Менеджер Локации
- * Version: 1.8.1
+ * Version: 2.0.0
  * Author: BiznesOnay
  * Text Domain: wc-multi-location-stock
  * Domain Path: /languages
@@ -46,7 +46,7 @@ class WC_Multi_Location_Stock {
     }
     
     private function define_constants() {
-        define('WCMLS_VERSION', '1.8.1');
+        define('WCMLS_VERSION', '2.0.0');
         define('WCMLS_PLUGIN_URL', plugin_dir_url(__FILE__));
         define('WCMLS_PLUGIN_PATH', plugin_dir_path(__FILE__));
         
@@ -189,6 +189,25 @@ class WC_Multi_Location_Stock {
                 }
             }
             
+            if (version_compare($current_version, '1.9.0', '<')) {
+                // Force CSS update for error styles
+                $css_file = WCMLS_PLUGIN_PATH . 'assets/css/admin.css';
+                if (file_exists($css_file)) {
+                    @unlink($css_file);
+                }
+            }
+            
+            if (version_compare($current_version, '2.0.0', '<')) {
+                // Major update notification
+                add_action('admin_notices', function() {
+                    echo '<div class="notice notice-info is-dismissible"><p><strong>' . 
+                         __('WooCommerce Multi-Location Stock обновлен до версии 2.0.0!', 'wc-multi-location-stock') . 
+                         '</strong> ' . 
+                         __('Теперь ID локации генерируется автоматически из названия.', 'wc-multi-location-stock') . 
+                         '</p></div>';
+                });
+            }
+            
             // Update version
             update_option('wcmls_version', WCMLS_VERSION);
         }
@@ -309,8 +328,8 @@ class WC_Multi_Location_Stock {
         if (current_user_can('manage_woocommerce')) {
             add_submenu_page(
                 'woocommerce',
-                __('Локации', 'wc-multi-location-stock'),
-                __('Локации', 'wc-multi-location-stock'),
+                __('Multi-Location Stock', 'wc-multi-location-stock'),
+                __('Multi-Location Stock', 'wc-multi-location-stock'),
                 'manage_woocommerce',
                 'wcmls-settings',
                 [$this, 'settings_page']
@@ -514,7 +533,7 @@ class WC_Multi_Location_Stock {
             <div class="notice notice-info">
                 <p><?php _e('Шорткод для выбора локации:', 'wc-multi-location-stock'); ?> <code>[location_selector]</code></p>
                 <p><?php _e('Вставьте этот шорткод на любую страницу, где покупатели должны выбирать свою локацию.', 'wc-multi-location-stock'); ?></p>
-                <p><strong><?php _e('Новое в версии 1.8.1:', 'wc-multi-location-stock'); ?></strong> <?php _e('Убран индикатор прокрутки для более чистого интерфейса.', 'wc-multi-location-stock'); ?></p>
+                <p><strong><?php _e('Новое в версии 2.0.0:', 'wc-multi-location-stock'); ?></strong> <?php _e('ID локации теперь генерируется автоматически из названия с поддержкой русского и казахского алфавитов.', 'wc-multi-location-stock'); ?></p>
             </div>
             
             <form method="post" action="">
@@ -522,7 +541,7 @@ class WC_Multi_Location_Stock {
                 
                 <h2><?php _e('Управление локациями', 'wc-multi-location-stock'); ?></h2>
                 
-                <table class="wp-list-table widefat fixed striped wcmls-stock-table <?php echo $is_admin ? 'admin-view' : ''; ?>">
+                <table class="wp-list-table widefat fixed striped wcmls-stock-table">
                     <thead>
                         <tr>
                             <th><?php _e('ID локации', 'wc-multi-location-stock'); ?></th>
@@ -532,7 +551,7 @@ class WC_Multi_Location_Stock {
                             <th><?php _e('Действия', 'wc-multi-location-stock'); ?></th>
                         </tr>
                     </thead>
-                    <tbody id="locations-list">
+                    <tbody id="locations-list"><?php echo ' '; // Добавлен ID для JavaScript ?>
                         <?php if (!empty($locations)): ?>
                             <?php foreach ($locations as $location_id => $location): ?>
                                 <tr>
@@ -575,7 +594,7 @@ class WC_Multi_Location_Stock {
                         <th><label for="new_location_id"><?php _e('ID локации', 'wc-multi-location-stock'); ?></label></th>
                         <td>
                             <input type="text" id="new_location_id" name="new_location[id]" />
-                            <p class="description"><?php _e('Уникальный идентификатор (латиница, без пробелов)', 'wc-multi-location-stock'); ?></p>
+                            <p class="description"><?php _e('Уникальный идентификатор (латиница, без пробелов). Генерируется автоматически из названия.', 'wc-multi-location-stock'); ?></p>
                         </td>
                     </tr>
                     <tr>
@@ -631,8 +650,174 @@ class WC_Multi_Location_Stock {
                     }).appendTo('form');
                 }
             });
+            
+            // Функция транслитерации
+            function transliterate(str) {
+                var ru = {
+                    'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 
+                    'е': 'e', 'ё': 'e', 'ж': 'zh', 'з': 'z', 'и': 'i', 
+                    'й': 'y', 'к': 'k', 'л': 'l', 'м': 'm', 'н': 'n', 
+                    'о': 'o', 'п': 'p', 'р': 'r', 'с': 's', 'т': 't', 
+                    'у': 'u', 'ф': 'f', 'х': 'h', 'ц': 'c', 'ч': 'ch', 
+                    'ш': 'sh', 'щ': 'sch', 'ь': '', 'ы': 'y', 'ъ': '', 
+                    'э': 'e', 'ю': 'yu', 'я': 'ya',
+                    'А': 'A', 'Б': 'B', 'В': 'V', 'Г': 'G', 'Д': 'D', 
+                    'Е': 'E', 'Ё': 'E', 'Ж': 'Zh', 'З': 'Z', 'И': 'I', 
+                    'Й': 'Y', 'К': 'K', 'Л': 'L', 'М': 'M', 'Н': 'N', 
+                    'О': 'O', 'П': 'P', 'Р': 'R', 'С': 'S', 'Т': 'T', 
+                    'У': 'U', 'Ф': 'F', 'Х': 'H', 'Ц': 'C', 'Ч': 'Ch', 
+                    'Ш': 'Sh', 'Щ': 'Sch', 'Ь': '', 'Ы': 'Y', 'Ъ': '', 
+                    'Э': 'E', 'Ю': 'Yu', 'Я': 'Ya',
+                    // Казахские буквы
+                    'ә': 'a', 'ғ': 'g', 'қ': 'k', 'ң': 'n', 'ө': 'o', 'ұ': 'u', 'ү': 'u', 'һ': 'h', 'і': 'i',
+                    'Ә': 'A', 'Ғ': 'G', 'Қ': 'K', 'Ң': 'N', 'Ө': 'O', 'Ұ': 'U', 'Ү': 'U', 'Һ': 'H', 'І': 'I'
+                };
+                
+                var result = '';
+                for (var i = 0; i < str.length; i++) {
+                    result += ru[str[i]] || str[i];
+                }
+                return result;
+            }
+            
+            // Функция генерации ID из названия
+            function generateLocationId(name) {
+                if (!name) return '';
+                
+                // Транслитерация
+                var id = transliterate(name);
+                
+                // Преобразование в нижний регистр
+                id = id.toLowerCase();
+                
+                // Замена пробелов и специальных символов на дефисы
+                id = id.replace(/[^a-z0-9]+/g, '-');
+                
+                // Удаление дефисов в начале и конце
+                id = id.replace(/^-+|-+$/g, '');
+                
+                // Ограничение длины (максимум 50 символов)
+                if (id.length > 50) {
+                    id = id.substring(0, 50);
+                }
+                
+                return id;
+            }
+            
+            // Проверка уникальности ID
+            function isLocationIdUnique(id) {
+                var existingIds = [];
+                
+                // Собрать все существующие ID
+                $('#locations-list tr').each(function() {
+                    var existingId = $(this).find('td:first').text().trim();
+                    if (existingId) {
+                        existingIds.push(existingId);
+                    }
+                });
+                
+                return !existingIds.includes(id);
+            }
+            
+            // Автоматическая генерация ID при вводе названия
+            $('#new_location_name').on('input', function() {
+                var name = $(this).val();
+                var generatedId = generateLocationId(name);
+                var $idField = $('#new_location_id');
+                
+                // Только если поле ID пустое или содержит ранее сгенерированное значение
+                if ($idField.val() === '' || $idField.data('auto-generated')) {
+                    // Проверка уникальности
+                    var finalId = generatedId;
+                    var counter = 1;
+                    
+                    while (!isLocationIdUnique(finalId) && counter < 100) {
+                        finalId = generatedId + '-' + counter;
+                        counter++;
+                    }
+                    
+                    $idField.val(finalId);
+                    $idField.data('auto-generated', true);
+                    
+                    // Подсветка если ID не уникален
+                    if (!isLocationIdUnique(finalId)) {
+                        $idField.css('border-color', '#dc3232');
+                        if (!$idField.next('.wcmls-error').length) {
+                            $idField.after('<span class="wcmls-error" style="color: #dc3232; font-size: 12px;"><?php _e('ID должен быть уникальным', 'wc-multi-location-stock'); ?></span>');
+                        }
+                    } else {
+                        $idField.css('border-color', '');
+                        $idField.next('.wcmls-error').remove();
+                    }
+                }
+            });
+            
+            // Снять флаг auto-generated при ручном редактировании ID
+            $('#new_location_id').on('input', function() {
+                $(this).data('auto-generated', false);
+                
+                // Проверка уникальности при ручном вводе
+                var id = $(this).val();
+                
+                // Проверка формата ID
+                if (id && !/^[a-z0-9\-]+$/.test(id)) {
+                    $(this).css('border-color', '#dc3232');
+                    if (!$(this).next('.wcmls-error').length) {
+                        $(this).after('<span class="wcmls-error" style="color: #dc3232; font-size: 12px;"><?php _e('ID может содержать только латинские буквы в нижнем регистре, цифры и дефисы', 'wc-multi-location-stock'); ?></span>');
+                    }
+                } else if (id && !isLocationIdUnique(id)) {
+                    $(this).css('border-color', '#dc3232');
+                    if (!$(this).next('.wcmls-error').length) {
+                        $(this).after('<span class="wcmls-error" style="color: #dc3232; font-size: 12px;"><?php _e('ID должен быть уникальным', 'wc-multi-location-stock'); ?></span>');
+                    }
+                } else {
+                    $(this).css('border-color', '');
+                    $(this).next('.wcmls-error').remove();
+                }
+            });
+            
+            // Предотвратить отправку формы если ID не уникален
+            $('form').on('submit', function(e) {
+                var newId = $('#new_location_id').val();
+                if (newId) {
+                    // Проверка формата
+                    if (!/^[a-z0-9\-]+$/.test(newId)) {
+                        e.preventDefault();
+                        alert('<?php _e('ID локации может содержать только латинские буквы в нижнем регистре, цифры и дефисы!', 'wc-multi-location-stock'); ?>');
+                        $('#new_location_id').focus();
+                        return false;
+                    }
+                    // Проверка уникальности
+                    if (!isLocationIdUnique(newId)) {
+                        e.preventDefault();
+                        alert('<?php _e('ID локации должен быть уникальным!', 'wc-multi-location-stock'); ?>');
+                        $('#new_location_id').focus();
+                        return false;
+                    }
+                }
+            });
         });
         </script>
+        
+        <style>
+        /* Стили для полей с ошибками */
+        input[type="text"].error,
+        input[type="text"]:invalid {
+            border-color: #dc3232 !important;
+        }
+        
+        .wcmls-error {
+            display: block;
+            color: #dc3232;
+            font-size: 12px;
+            margin-top: 5px;
+        }
+        
+        /* Индикация автогенерации */
+        #new_location_id[data-auto-generated="true"] {
+            background-color: #f0f0f1;
+        }
+        </style>
         <?php
     }
     
@@ -642,6 +827,7 @@ class WC_Multi_Location_Stock {
         }
         
         $locations = $this->locations;
+        $has_errors = false;
         
         // Update existing locations
         if (isset($_POST['locations'])) {
@@ -656,7 +842,24 @@ class WC_Multi_Location_Stock {
         // Add new location
         if (!empty($_POST['new_location']['id']) && !empty($_POST['new_location']['name'])) {
             $new_id = sanitize_key($_POST['new_location']['id']);
-            if (!isset($locations[$new_id])) {
+            
+            // Проверка формата ID (только латиница, цифры и дефисы)
+            if (!preg_match('/^[a-z0-9\-]+$/', $new_id)) {
+                $has_errors = true;
+                add_action('admin_notices', function() {
+                    echo '<div class="notice notice-error"><p>' . 
+                         __('ID локации может содержать только латинские буквы, цифры и дефисы.', 'wc-multi-location-stock') . 
+                         '</p></div>';
+                });
+            } elseif (isset($locations[$new_id])) {
+                // Проверка уникальности ID
+                $has_errors = true;
+                add_action('admin_notices', function() {
+                    echo '<div class="notice notice-error"><p>' . 
+                         __('ID локации должен быть уникальным. Локация не была добавлена.', 'wc-multi-location-stock') . 
+                         '</p></div>';
+                });
+            } else {
                 $locations[$new_id] = [
                     'name' => sanitize_text_field($_POST['new_location']['name']),
                     'manager' => absint($_POST['new_location']['manager'])
@@ -689,12 +892,17 @@ class WC_Multi_Location_Stock {
         // Initialize stock records for new locations
         if (!empty($_POST['new_location']['id']) && !empty($_POST['new_location']['name'])) {
             $new_id = sanitize_key($_POST['new_location']['id']);
-            $this->init_location_stock_for_all_products($new_id);
+            // Инициализировать только если локация была успешно добавлена
+            if (isset($locations[$new_id])) {
+                $this->init_location_stock_for_all_products($new_id);
+            }
         }
         
-        add_action('admin_notices', function() {
-            echo '<div class="notice notice-success"><p>' . __('Настройки сохранены.', 'wc-multi-location-stock') . '</p></div>';
-        });
+        if (!$has_errors) {
+            add_action('admin_notices', function() {
+                echo '<div class="notice notice-success"><p>' . __('Настройки сохранены.', 'wc-multi-location-stock') . '</p></div>';
+            });
+        }
     }
     
     public function stock_management_page() {
