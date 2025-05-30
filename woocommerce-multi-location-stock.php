@@ -3,7 +3,7 @@
  * Plugin Name: WooCommerce Multi-Location Stock
  * Plugin URI: https://biznesonay.kz/
  * Description: Управление складом по локациям для WooCommerce с ролью Менеджер Локации
- * Version: 1.6.1
+ * Version: 1.8.1
  * Author: BiznesOnay
  * Text Domain: wc-multi-location-stock
  * Domain Path: /languages
@@ -11,6 +11,11 @@
  * Requires PHP: 7.4
  * WC requires at least: 9.8.5
  * WC tested up to: 9.8.5
+ * 
+ * Changelog:
+ * 1.7.0 - Added automatic city sync on checkout, stock sync on order completion
+ * 1.6.3 - Fixed location selection and JS errors
+ * 1.6.2 - Added total stock synchronization functionality
  */
 
 defined('ABSPATH') || exit;
@@ -41,7 +46,7 @@ class WC_Multi_Location_Stock {
     }
     
     private function define_constants() {
-        define('WCMLS_VERSION', '1.6.1');
+        define('WCMLS_VERSION', '1.8.1');
         define('WCMLS_PLUGIN_URL', plugin_dir_url(__FILE__));
         define('WCMLS_PLUGIN_PATH', plugin_dir_path(__FILE__));
         
@@ -68,6 +73,8 @@ class WC_Multi_Location_Stock {
         add_action('woocommerce_checkout_update_order_meta', [$this, 'process_order_stock']);
         add_action('woocommerce_order_status_cancelled', [$this, 'restore_order_stock']);
         add_action('woocommerce_order_status_refunded', [$this, 'restore_order_stock']);
+        add_action('woocommerce_order_status_completed', [$this, 'sync_stock_on_order_complete']);
+        add_action('woocommerce_order_status_processing', [$this, 'sync_stock_on_order_complete']);
         add_action('wp_enqueue_scripts', [$this, 'enqueue_scripts']);
         add_action('admin_enqueue_scripts', [$this, 'admin_enqueue_scripts']);
         add_shortcode('location_selector', [$this, 'location_selector_shortcode']);
@@ -82,6 +89,11 @@ class WC_Multi_Location_Stock {
         // Frontend filters
         add_filter('woocommerce_product_query_meta_query', [$this, 'filter_products_by_location_stock']);
         add_filter('woocommerce_billing_fields', [$this, 'customize_billing_city_field']);
+        add_filter('woocommerce_checkout_get_value', [$this, 'set_checkout_city_value'], 10, 2);
+        add_action('woocommerce_checkout_init', [$this, 'init_checkout_city']);
+        add_action('woocommerce_after_checkout_validation', [$this, 'validate_checkout_location'], 10, 2);
+        add_action('woocommerce_checkout_update_order_review', [$this, 'save_location_on_checkout_update']);
+        add_filter('woocommerce_checkout_fields', [$this, 'make_city_field_required']);
         
         // Ajax handlers
         add_action('wp_ajax_wcmls_set_location', [$this, 'ajax_set_location']);
@@ -133,6 +145,48 @@ class WC_Multi_Location_Stock {
             if (version_compare($current_version, '1.6.1', '<')) {
                 // Ensure table exists
                 $this->create_tables();
+            }
+            
+            if (version_compare($current_version, '1.6.2', '<')) {
+                // Sync all product stocks
+                $this->sync_all_products_stock();
+            }
+            
+            if (version_compare($current_version, '1.6.3', '<')) {
+                // Ensure checkout city sync is working
+                flush_rewrite_rules();
+            }
+            
+            if (version_compare($current_version, '1.7.0', '<')) {
+                // Clear any cached checkout data
+                if (WC()->session) {
+                    WC()->session->set('billing_city', null);
+                }
+            }
+            
+            if (version_compare($current_version, '1.7.1', '<')) {
+                // Ensure CSS files are updated for scrolling functionality
+                $css_file = WCMLS_PLUGIN_PATH . 'assets/css/admin.css';
+                if (file_exists($css_file)) {
+                    // Force CSS file recreation
+                    @unlink($css_file);
+                }
+            }
+            
+            if (version_compare($current_version, '1.8.0', '<')) {
+                // Force CSS update for enhanced scrolling features
+                $css_file = WCMLS_PLUGIN_PATH . 'assets/css/admin.css';
+                if (file_exists($css_file)) {
+                    @unlink($css_file);
+                }
+            }
+            
+            if (version_compare($current_version, '1.8.1', '<')) {
+                // Force CSS update to remove scroll indicator
+                $css_file = WCMLS_PLUGIN_PATH . 'assets/css/admin.css';
+                if (file_exists($css_file)) {
+                    @unlink($css_file);
+                }
             }
             
             // Update version
@@ -255,8 +309,8 @@ class WC_Multi_Location_Stock {
         if (current_user_can('manage_woocommerce')) {
             add_submenu_page(
                 'woocommerce',
-                __('Multi-Location Stock', 'wc-multi-location-stock'),
-                __('Multi-Location Stock', 'wc-multi-location-stock'),
+                __('Локации', 'wc-multi-location-stock'),
+                __('Локации', 'wc-multi-location-stock'),
                 'manage_woocommerce',
                 'wcmls-settings',
                 [$this, 'settings_page']
@@ -421,6 +475,17 @@ class WC_Multi_Location_Stock {
             }
         }
         
+        if (isset($_POST['wcmls_sync_all_stock'])) {
+            if (isset($_POST['wcmls_nonce']) && wp_verify_nonce($_POST['wcmls_nonce'], 'wcmls_settings')) {
+                $synced = $this->sync_all_products_stock();
+                add_action('admin_notices', function() use ($synced) {
+                    echo '<div class="notice notice-success"><p>' . 
+                         sprintf(__('Синхронизировано запасов для %d товаров.', 'wc-multi-location-stock'), $synced) . 
+                         '</p></div>';
+                });
+            }
+        }
+        
         if (isset($_POST['wcmls_debug_mode'])) {
             if (isset($_POST['wcmls_nonce']) && wp_verify_nonce($_POST['wcmls_nonce'], 'wcmls_settings')) {
                 $debug_enabled = get_option('wcmls_debug_mode', false);
@@ -449,6 +514,7 @@ class WC_Multi_Location_Stock {
             <div class="notice notice-info">
                 <p><?php _e('Шорткод для выбора локации:', 'wc-multi-location-stock'); ?> <code>[location_selector]</code></p>
                 <p><?php _e('Вставьте этот шорткод на любую страницу, где покупатели должны выбирать свою локацию.', 'wc-multi-location-stock'); ?></p>
+                <p><strong><?php _e('Новое в версии 1.8.1:', 'wc-multi-location-stock'); ?></strong> <?php _e('Убран индикатор прокрутки для более чистого интерфейса.', 'wc-multi-location-stock'); ?></p>
             </div>
             
             <form method="post" action="">
@@ -539,6 +605,9 @@ class WC_Multi_Location_Stock {
                     <input type="submit" name="wcmls_init_stock" class="button-secondary" 
                            value="<?php _e('Инициализировать запасы для всех товаров', 'wc-multi-location-stock'); ?>" 
                            onclick="return confirm('<?php _e('Это создаст записи о запасах для всех товаров и локаций. Продолжить?', 'wc-multi-location-stock'); ?>');" />
+                    <input type="submit" name="wcmls_sync_all_stock" class="button-secondary" 
+                           value="<?php _e('Синхронизировать все запасы', 'wc-multi-location-stock'); ?>" 
+                           onclick="return confirm('<?php _e('Это пересчитает общие запасы для всех товаров на основе суммы локаций. Продолжить?', 'wc-multi-location-stock'); ?>');" />
                     <?php if (current_user_can('manage_options')): ?>
                     <input type="submit" name="wcmls_debug_mode" class="button-secondary" 
                            value="<?php echo get_option('wcmls_debug_mode', false) ? __('Отключить режим отладки', 'wc-multi-location-stock') : __('Включить режим отладки', 'wc-multi-location-stock'); ?>" />
@@ -679,102 +748,126 @@ class WC_Multi_Location_Stock {
                 <?php if ($is_admin): ?>
                     <p><?php _e('Изменения запасов локаций автоматически обновляют общие запасы WooCommerce.', 'wc-multi-location-stock'); ?></p>
                 <?php endif; ?>
+                <?php if (count($this->locations) > 3): ?>
+                    <p><strong><?php _e('Совет:', 'wc-multi-location-stock'); ?></strong> <?php _e('Используйте горизонтальную прокрутку или кнопки навигации для просмотра всех локаций.', 'wc-multi-location-stock'); ?></p>
+                <?php endif; ?>
             </div>
             
-            <table class="wp-list-table widefat fixed striped">
-                <thead>
-                    <tr>
-                        <th><?php _e('Товар', 'wc-multi-location-stock'); ?></th>
-                        <?php if ($is_admin): ?>
-                            <th><?php _e('Общий запас WC', 'wc-multi-location-stock'); ?></th>
-                        <?php endif; ?>
-                        <?php foreach ($this->locations as $location_id => $location): ?>
-                            <?php if ($is_admin || $user_location === $location_id): ?>
-                                <th>
-                                    <?php echo esc_html($location['name']); ?>
-                                    <br><small><?php _e('Текущий запас', 'wc-multi-location-stock'); ?></small>
-                                </th>
-                                <th>
-                                    <?php _e('Управление', 'wc-multi-location-stock'); ?>
-                                    <br><small><?php _e('Изменить на', 'wc-multi-location-stock'); ?></small>
-                                </th>
-                            <?php endif; ?>
-                        <?php endforeach; ?>
-                    </tr>
-                </thead>
-                <tbody>
-                    <?php
-                    $args = [
-                        'post_type' => 'product',
-                        'posts_per_page' => -1,
-                        'orderby' => 'title',
-                        'order' => 'ASC'
-                    ];
-                    
-                    $products = get_posts($args);
-                    
-                    foreach ($products as $product_post):
-                        $product = wc_get_product($product_post->ID);
-                        if (!$product || $product->is_type('variable')) continue;
-                        
-                        $product_id = $product->get_id();
-                        ?>
+            <div class="wcmls-table-controls">
+                <button type="button" class="button scroll-left" disabled>← <?php _e('Назад', 'wc-multi-location-stock'); ?></button>
+                <button type="button" class="button scroll-right"><?php _e('Вперед', 'wc-multi-location-stock'); ?> →</button>
+                <span class="wcmls-location-count"><?php printf(__('Локаций: %d', 'wc-multi-location-stock'), count($this->locations)); ?></span>
+            </div>
+            
+            <div class="wcmls-table-wrapper">
+                <table class="wp-list-table widefat striped wcmls-stock-table <?php echo $is_admin ? 'admin-view' : ''; ?>"><?php echo ' '; // Убрали fixed для правильной работы скроллинга ?>
+                    <thead>
                         <tr>
-                            <td>
-                                <strong><?php echo esc_html($product->get_name()); ?></strong>
-                                <br><small>SKU: <?php echo esc_html($product->get_sku()); ?></small>
-                                <?php if (defined('WCMLS_DEBUG') && WCMLS_DEBUG): ?>
-                                <br><small>ID: <?php echo $product_id; ?></small>
-                                <?php endif; ?>
-                            </td>
+                            <th><?php _e('Товар', 'wc-multi-location-stock'); ?></th>
                             <?php if ($is_admin): ?>
-                                <td class="total-stock" data-product="<?php echo esc_attr($product_id); ?>">
-                                    <strong><?php echo intval($product->get_stock_quantity()); ?></strong>
-                                </td>
+                                <th><?php _e('Общий запас WC', 'wc-multi-location-stock'); ?></th>
+                                <th><?php _e('Сумма по локациям', 'wc-multi-location-stock'); ?></th>
                             <?php endif; ?>
                             <?php foreach ($this->locations as $location_id => $location): ?>
                                 <?php if ($is_admin || $user_location === $location_id): ?>
-                                    <?php
-                                    // Get the actual stock from database
-                                    $stock = $this->get_product_location_stock($product_id, $location_id);
-                                    $can_edit = $is_admin || $user_location === $location_id;
-                                    
-                                    if (defined('WCMLS_DEBUG') && WCMLS_DEBUG) {
-                                        error_log("Display stock for product $product_id, location $location_id: $stock");
-                                    }
-                                    ?>
-                                    <td>
-                                        <strong class="current-stock" 
-                                                data-product="<?php echo esc_attr($product_id); ?>" 
-                                                data-location="<?php echo esc_attr($location_id); ?>"
-                                                id="stock-<?php echo esc_attr($product_id); ?>-<?php echo esc_attr($location_id); ?>">
-                                            <?php echo intval($stock); ?>
-                                        </strong>
-                                    </td>
-                                    <td>
-                                        <?php if ($can_edit): ?>
-                                            <input type="number" 
-                                                   class="location-stock-change" 
-                                                   data-product="<?php echo esc_attr($product_id); ?>" 
-                                                   data-location="<?php echo esc_attr($location_id); ?>" 
-                                                   placeholder="+/-" 
-                                                   style="width: 80px;" />
-                                            <button type="button" 
-                                                    class="button button-small apply-stock-change" 
-                                                    data-product="<?php echo esc_attr($product_id); ?>" 
-                                                    data-location="<?php echo esc_attr($location_id); ?>">
-                                                <?php _e('Применить', 'wc-multi-location-stock'); ?>
-                                            </button>
-                                        <?php else: ?>
-                                            <span class="description"><?php _e('Нет доступа', 'wc-multi-location-stock'); ?></span>
-                                        <?php endif; ?>
-                                    </td>
+                                    <th>
+                                        <?php echo esc_html($location['name']); ?>
+                                        <br><small><?php _e('Текущий запас', 'wc-multi-location-stock'); ?></small>
+                                    </th>
+                                    <th>
+                                        <?php _e('Управление', 'wc-multi-location-stock'); ?>
+                                        <br><small><?php _e('Изменить на', 'wc-multi-location-stock'); ?></small>
+                                    </th>
                                 <?php endif; ?>
                             <?php endforeach; ?>
                         </tr>
-                    <?php endforeach; ?>
-                </tbody>
-            </table>
+                    </thead>
+                    <tbody>
+                        <?php
+                        $args = [
+                            'post_type' => 'product',
+                            'posts_per_page' => -1,
+                            'orderby' => 'title',
+                            'order' => 'ASC'
+                        ];
+                        
+                        $products = get_posts($args);
+                        
+                        foreach ($products as $product_post):
+                            $product = wc_get_product($product_post->ID);
+                            if (!$product || $product->is_type('variable')) continue;
+                            
+                            $product_id = $product->get_id();
+                            ?>
+                            <tr>
+                                <td>
+                                    <strong><?php echo esc_html($product->get_name()); ?></strong>
+                                    <br><small>SKU: <?php echo esc_html($product->get_sku()); ?></small>
+                                    <?php if (defined('WCMLS_DEBUG') && WCMLS_DEBUG): ?>
+                                    <br><small>ID: <?php echo $product_id; ?></small>
+                                    <?php endif; ?>
+                                </td>
+                                <?php if ($is_admin): ?>
+                                    <td class="total-stock" data-product="<?php echo esc_attr($product_id); ?>">
+                                        <strong><?php echo intval($product->get_stock_quantity()); ?></strong>
+                                    </td>
+                                    <td class="location-sum" data-product="<?php echo esc_attr($product_id); ?>">
+                                        <?php
+                                        $location_sum = 0;
+                                        foreach ($this->locations as $loc_id => $loc) {
+                                            $location_sum += $this->get_product_location_stock($product_id, $loc_id);
+                                        }
+                                        ?>
+                                        <strong><?php echo $location_sum; ?></strong>
+                                        <?php if ($location_sum != intval($product->get_stock_quantity())): ?>
+                                            <span style="color: red;">⚠️</span>
+                                        <?php endif; ?>
+                                    </td>
+                                <?php endif; ?>
+                                <?php foreach ($this->locations as $location_id => $location): ?>
+                                    <?php if ($is_admin || $user_location === $location_id): ?>
+                                        <?php
+                                        // Get the actual stock from database
+                                        $stock = $this->get_product_location_stock($product_id, $location_id);
+                                        $can_edit = $is_admin || $user_location === $location_id;
+                                        
+                                        if (defined('WCMLS_DEBUG') && WCMLS_DEBUG) {
+                                            error_log("Display stock for product $product_id, location $location_id: $stock");
+                                        }
+                                        ?>
+                                        <td>
+                                            <strong class="current-stock" 
+                                                    data-product="<?php echo esc_attr($product_id); ?>" 
+                                                    data-location="<?php echo esc_attr($location_id); ?>"
+                                                    id="stock-<?php echo esc_attr($product_id); ?>-<?php echo esc_attr($location_id); ?>">
+                                                <?php echo intval($stock); ?>
+                                            </strong>
+                                        </td>
+                                        <td>
+                                            <?php if ($can_edit): ?>
+                                                <input type="number" 
+                                                       class="location-stock-change" 
+                                                       data-product="<?php echo esc_attr($product_id); ?>" 
+                                                       data-location="<?php echo esc_attr($location_id); ?>" 
+                                                       placeholder="+/-" 
+                                                       style="width: 80px;" />
+                                                <button type="button" 
+                                                        class="button button-small apply-stock-change" 
+                                                        data-product="<?php echo esc_attr($product_id); ?>" 
+                                                        data-location="<?php echo esc_attr($location_id); ?>">
+                                                    <?php _e('Применить', 'wc-multi-location-stock'); ?>
+                                                </button>
+                                            <?php else: ?>
+                                                <span class="description"><?php _e('Нет доступа', 'wc-multi-location-stock'); ?></span>
+                                            <?php endif; ?>
+                                        </td>
+                                    <?php endif; ?>
+                                <?php endforeach; ?>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </div>
         </div>
         
         <style>
@@ -783,11 +876,26 @@ class WC_Multi_Location_Stock {
             display: inline-block;
             text-align: center;
         }
+        
+        /* Стили для контролов таблицы */
+        .wcmls-table-controls {
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .wcmls-table-controls .wcmls-location-count {
+            margin-left: auto;
+            color: #666;
+            font-size: 13px;
+        }
         </style>
         
         <script>
         jQuery(document).ready(function($) {
-            $('.apply-stock-change').on('click', function() {
+            // Существующий код для применения изменений запасов с делегированием событий
+            $(document).on('click', '.apply-stock-change', function() {
                 var $button = $(this);
                 var productId = $button.data('product');
                 var locationId = $button.data('location');
@@ -836,6 +944,14 @@ class WC_Multi_Location_Stock {
                             if (response.data.new_total_stock !== undefined) {
                                 $('.total-stock[data-product="' + productId + '"]').html('<strong>' + response.data.new_total_stock + '</strong>');
                             }
+                            if (response.data.location_sum !== undefined) {
+                                var $sumCell = $('.location-sum[data-product="' + productId + '"]');
+                                var sumHtml = '<strong>' + response.data.location_sum + '</strong>';
+                                if (response.data.location_sum != response.data.new_total_stock) {
+                                    sumHtml += ' <span style="color: red;">⚠️</span>';
+                                }
+                                $sumCell.html(sumHtml);
+                            }
                             <?php endif; ?>
                             
                             // Flash success
@@ -866,8 +982,8 @@ class WC_Multi_Location_Stock {
                 });
             });
             
-            // Allow Enter key to apply changes
-            $('.location-stock-change').on('keypress', function(e) {
+            // Allow Enter key to apply changes с делегированием
+            $(document).on('keypress', '.location-stock-change', function(e) {
                 if (e.which === 13) {
                     e.preventDefault();
                     var productId = $(this).data('product');
@@ -875,9 +991,108 @@ class WC_Multi_Location_Stock {
                     $('.apply-stock-change[data-product="' + productId + '"][data-location="' + locationId + '"]').click();
                 }
             });
+            
+            // Горизонтальный скроллинг
+            var $wrapper = $('.wcmls-table-wrapper');
+            var $table = $wrapper.find('table');
+            
+            // Проверить нужен ли скроллинг
+            function checkScroll() {
+                if ($table.width() > $wrapper.width()) {
+                    $wrapper.removeClass('no-scroll');
+                } else {
+                    $wrapper.addClass('no-scroll');
+                }
+            }
+            
+            // Добавить класс при скроллинге для тени
+            $wrapper.on('scroll', function() {
+                if ($(this).scrollLeft() > 0) {
+                    $(this).addClass('wcmls-table-scrolled');
+                } else {
+                    $(this).removeClass('wcmls-table-scrolled');
+                }
+                
+                // Обновление состояния кнопок
+                var scrollLeft = $(this).scrollLeft();
+                var maxScroll = $table.width() - $wrapper.width();
+                
+                $('.scroll-left').prop('disabled', scrollLeft <= 0);
+                $('.scroll-right').prop('disabled', scrollLeft >= maxScroll);
+            });
+            
+            // Проверить при загрузке и изменении размера окна
+            checkScroll();
+            $(window).on('resize', checkScroll);
+            
+            // Горизонтальный скроллинг колесом мыши при зажатом Shift
+            $wrapper.on('wheel', function(e) {
+                if (e.shiftKey) {
+                    e.preventDefault();
+                    var scrollLeft = $(this).scrollLeft();
+                    $(this).scrollLeft(scrollLeft + e.originalEvent.deltaY);
+                }
+            });
+            
+            // Кнопки прокрутки
+            $('.scroll-left').on('click', function() {
+                $wrapper.animate({ scrollLeft: '-=300' }, 300);
+            });
+            
+            $('.scroll-right').on('click', function() {
+                $wrapper.animate({ scrollLeft: '+=300' }, 300);
+            });
+            
+            // Инициализация состояния кнопок
+            $wrapper.trigger('scroll');
         });
         </script>
         <?php
+    }
+    
+    // Новая функция для синхронизации общего запаса товара
+    private function sync_total_stock($product_id) {
+        $product = wc_get_product($product_id);
+        if (!$product) return false;
+        
+        // Вычислить сумму запасов по всем локациям
+        $total_stock = 0;
+        foreach ($this->locations as $location_id => $location) {
+            $total_stock += $this->get_product_location_stock($product_id, $location_id);
+        }
+        
+        // Обновить общий запас WooCommerce
+        $product->set_stock_quantity($total_stock);
+        $product->set_manage_stock(true);
+        $product->save();
+        
+        if (defined('WCMLS_DEBUG') && WCMLS_DEBUG) {
+            error_log("WCMLS sync_total_stock: product $product_id, total stock = $total_stock");
+        }
+        
+        return $total_stock;
+    }
+    
+    // Новая функция для массовой синхронизации
+    private function sync_all_products_stock() {
+        $args = [
+            'post_type' => 'product',
+            'posts_per_page' => -1,
+            'fields' => 'ids'
+        ];
+        
+        $product_ids = get_posts($args);
+        $synced = 0;
+        
+        foreach ($product_ids as $product_id) {
+            $product = wc_get_product($product_id);
+            if (!$product || $product->is_type('variable')) continue;
+            
+            $this->sync_total_stock($product_id);
+            $synced++;
+        }
+        
+        return $synced;
     }
     
     public function ajax_update_stock() {
@@ -941,25 +1156,13 @@ class WC_Multi_Location_Stock {
             error_log("AJAX: New stock after update: $new_location_stock, verified from DB: $verified_stock");
         }
         
-        // Update WooCommerce total stock
-        $new_total_stock = null;
-        if ($product) {
-            // Get current total stock
-            $current_total_stock = intval($product->get_stock_quantity());
-            
-            // Calculate new total stock
-            $new_total_stock = max(0, $current_total_stock + $change);
-            
-            // Update product stock
-            $product->set_stock_quantity($new_total_stock);
-            $product->set_manage_stock(true);
-            
-            // Save the product
-            $product->save();
-            
-            if (defined('WCMLS_DEBUG') && WCMLS_DEBUG) {
-                error_log("AJAX: Updated WC total stock from $current_total_stock to $new_total_stock");
-            }
+        // ВАЖНО: Синхронизировать общий запас WooCommerce
+        $new_total_stock = $this->sync_total_stock($product_id);
+        
+        // Вычислить сумму по локациям для отображения
+        $location_sum = 0;
+        foreach ($this->locations as $loc_id => $loc) {
+            $location_sum += $this->get_product_location_stock($product_id, $loc_id);
         }
         
         // Prepare response
@@ -967,13 +1170,10 @@ class WC_Multi_Location_Stock {
             'message' => __('Запас обновлен.', 'wc-multi-location-stock'),
             'new_stock' => $verified_stock, // Use verified stock from DB
             'change_applied' => $change,
-            'old_stock' => $current_location_stock
+            'old_stock' => $current_location_stock,
+            'new_total_stock' => $new_total_stock,
+            'location_sum' => $location_sum
         ];
-        
-        // Include new total stock if available
-        if ($new_total_stock !== null) {
-            $response_data['new_total_stock'] = $new_total_stock;
-        }
         
         wp_send_json_success($response_data);
     }
@@ -1109,6 +1309,31 @@ class WC_Multi_Location_Stock {
             // Check for stock with non-zero values
             $non_zero = $wpdb->get_var("SELECT COUNT(*) FROM {$table_name} WHERE stock_quantity > 0");
             $diagnostics[] = 'Records with stock > 0: ' . $non_zero;
+            
+            // Check stock sync issues
+            $sync_issues = 0;
+            $args = [
+                'post_type' => 'product',
+                'posts_per_page' => -1,
+                'fields' => 'ids'
+            ];
+            
+            $product_ids = get_posts($args);
+            foreach ($product_ids as $product_id) {
+                $product = wc_get_product($product_id);
+                if (!$product || $product->is_type('variable')) continue;
+                
+                $wc_stock = intval($product->get_stock_quantity());
+                $location_sum = 0;
+                foreach ($this->locations as $location_id => $location) {
+                    $location_sum += $this->get_product_location_stock($product_id, $location_id);
+                }
+                
+                if ($wc_stock != $location_sum) {
+                    $sync_issues++;
+                }
+            }
+            $diagnostics[] = 'Products with sync issues: ' . $sync_issues;
         } else {
             // Table doesn't exist, try to create it
             $this->create_tables();
@@ -1333,11 +1558,35 @@ class WC_Multi_Location_Stock {
                 </p>
             <?php endif; ?>
         </div>
+        
+        <script type="text/javascript">
+        /* Inline script as fallback */
+        if (typeof wcmls_ajax === 'undefined') {
+            var wcmls_ajax = {
+                ajax_url: '<?php echo admin_url('admin-ajax.php'); ?>',
+                nonce: '<?php echo wp_create_nonce('wcmls_nonce'); ?>',
+                strings: {
+                    select_location: '<?php echo esc_js(__('Пожалуйста, выберите локацию перед добавлением товара в корзину.', 'wc-multi-location-stock')); ?>',
+                    location_changed: '<?php echo esc_js(__('Локация изменена. Ваша корзина была очищена.', 'wc-multi-location-stock')); ?>'
+                }
+            };
+        }
+        
+        // Сохраняем выбранную локацию в глобальной переменной
+        <?php if ($selected_location && isset($this->locations[$selected_location])): ?>
+        window.wcmls_selected_location_name = '<?php echo esc_js($this->locations[$selected_location]['name']); ?>';
+        <?php endif; ?>
+        </script>
         <?php
         return ob_get_clean();
     }
     
     public function ajax_set_location() {
+        // Проверяем nonce
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'wcmls_nonce')) {
+            wp_send_json_error(__('Неверный nonce.', 'wc-multi-location-stock'));
+        }
+        
         $location = isset($_POST['location']) ? sanitize_key($_POST['location']) : '';
         
         if ($location && isset($this->locations[$location])) {
@@ -1347,19 +1596,43 @@ class WC_Multi_Location_Stock {
                 update_user_meta(get_current_user_id(), 'wcmls_selected_location', $location);
             }
             
+            // Устанавливаем город в сессии WooCommerce
+            if (WC()->customer) {
+                $location_name = $this->locations[$location]['name'];
+                WC()->customer->set_billing_city($location_name);
+                WC()->customer->save();
+            }
+            
             // Clear cart if location changed
-            if (WC()->cart && $this->get_selected_location() !== $location) {
+            $previous_location = $this->get_selected_location();
+            if (WC()->cart && $previous_location && $previous_location !== $location) {
                 WC()->cart->empty_cart();
             }
             
-            wp_send_json_success(['message' => __('Локация установлена.', 'wc-multi-location-stock')]);
+            wp_send_json_success([
+                'message' => __('Локация установлена.', 'wc-multi-location-stock'),
+                'location_name' => $this->locations[$location]['name']
+            ]);
         } else {
             wp_send_json_error(__('Неверная локация.', 'wc-multi-location-stock'));
         }
     }
     
     public function enqueue_scripts() {
-        wp_enqueue_script(
+        // Создаем файл frontend.js если его нет
+        $js_file = WCMLS_PLUGIN_PATH . 'assets/js/frontend.js';
+        $js_dir = dirname($js_file);
+        
+        if (!file_exists($js_dir)) {
+            wp_mkdir_p($js_dir);
+        }
+        
+        if (!file_exists($js_file)) {
+            $this->create_frontend_js_file();
+        }
+        
+        // Регистрируем и загружаем скрипт
+        wp_register_script(
             'wcmls-frontend',
             WCMLS_PLUGIN_URL . 'assets/js/frontend.js',
             ['jquery'],
@@ -1367,18 +1640,84 @@ class WC_Multi_Location_Stock {
             true
         );
         
+        // Получаем выбранную локацию
+        $selected_location = $this->get_selected_location();
+        $location_name = '';
+        if ($selected_location && isset($this->locations[$selected_location])) {
+            $location_name = $this->locations[$selected_location]['name'];
+        }
+        
+        // Локализуем скрипт
         wp_localize_script('wcmls-frontend', 'wcmls_ajax', [
             'ajax_url' => admin_url('admin-ajax.php'),
             'nonce' => wp_create_nonce('wcmls_nonce'),
+            'selected_location_name' => $location_name,
             'strings' => [
                 'select_location' => __('Пожалуйста, выберите локацию перед добавлением товара в корзину.', 'wc-multi-location-stock'),
                 'location_changed' => __('Локация изменена. Ваша корзина была очищена.', 'wc-multi-location-stock')
             ]
         ]);
+        
+        // Загружаем скрипт
+        wp_enqueue_script('wcmls-frontend');
+    }
+    
+    private function create_frontend_js_file() {
+        $frontend_js = 'jQuery(document).ready(function($) {
+    // Проверяем, что wcmls_ajax определен
+    if (typeof wcmls_ajax === "undefined") {
+        console.error("wcmls_ajax is not defined!");
+        return;
+    }
+    
+    // Handle location selection
+    $(document).on("change", "#wcmls-location", function() {
+        var location = $(this).val();
+        
+        if (!location) {
+            alert(wcmls_ajax.strings.select_location);
+            return;
+        }
+        
+        $.ajax({
+            url: wcmls_ajax.ajax_url,
+            type: "POST",
+            data: {
+                action: "wcmls_set_location",
+                location: location,
+                nonce: wcmls_ajax.nonce
+            },
+            success: function(response) {
+                if (response.success) {
+                    alert(wcmls_ajax.strings.location_changed);
+                    window.location.reload();
+                }
+            },
+            error: function(xhr, status, error) {
+                console.error("AJAX error:", status, error);
+                alert("Ошибка при изменении локации. Попробуйте еще раз.");
+            }
+        });
+    });
+    
+    // Validate location before add to cart
+    $("form.cart").on("submit", function(e) {
+        if (!document.cookie.includes("wcmls_selected_location")) {
+            e.preventDefault();
+            alert(wcmls_ajax.strings.select_location);
+            return false;
+        }
+    });
+});';
+        
+        file_put_contents(WCMLS_PLUGIN_PATH . 'assets/js/frontend.js', $frontend_js);
     }
     
     public function admin_enqueue_scripts($hook) {
         if (in_array($hook, ['woocommerce_page_wcmls-settings', 'woocommerce_page_wcmls-stock'])) {
+            // Ensure CSS file exists with latest styles
+            $this->ensure_admin_css_exists();
+            
             wp_enqueue_style(
                 'wcmls-admin',
                 WCMLS_PLUGIN_URL . 'assets/css/admin.css',
@@ -1386,6 +1725,222 @@ class WC_Multi_Location_Stock {
                 WCMLS_VERSION
             );
         }
+    }
+    
+    private function ensure_admin_css_exists() {
+        $css_file = WCMLS_PLUGIN_PATH . 'assets/css/admin.css';
+        $css_dir = dirname($css_file);
+        
+        if (!file_exists($css_dir)) {
+            wp_mkdir_p($css_dir);
+        }
+        
+        // Check if file exists or needs update
+        $current_css_version = get_option('wcmls_admin_css_version', '0');
+        
+        if (!file_exists($css_file) || version_compare($current_css_version, WCMLS_VERSION, '<')) {
+            $admin_css = $this->get_admin_css();
+            file_put_contents($css_file, $admin_css);
+            update_option('wcmls_admin_css_version', WCMLS_VERSION);
+        }
+    }
+    
+    private function get_admin_css() {
+        return '.wcmls-location-selector {
+    margin: 20px 0;
+    padding: 15px;
+    background: #f5f5f5;
+    border: 1px solid #ddd;
+}
+
+.wcmls-location-selector select {
+    width: 100%;
+    max-width: 300px;
+}
+
+.wcmls-current-location {
+    margin-top: 10px;
+    font-weight: bold;
+}
+
+.location-stock-input {
+    width: 80px;
+}
+
+.location-stock-input[readonly] {
+    background-color: #f0f0f0;
+}
+
+.location-stock-change {
+    width: 80px !important;
+}
+
+.current-stock {
+    font-size: 16px;
+    padding: 5px 10px;
+    display: inline-block;
+    min-width: 40px;
+    text-align: center;
+    border-radius: 3px;
+    background: #f0f0f0;
+}
+
+.apply-stock-change {
+    margin-left: 5px;
+}
+
+/* Better table layout for stock management */
+.wp-list-table.wcmls-stock-table th,
+.wp-list-table.wcmls-stock-table td {
+    vertical-align: middle;
+}
+
+.wp-list-table.wcmls-stock-table th:first-child {
+    width: 30%;
+}
+
+.wp-list-table.wcmls-stock-table .button-small {
+    height: 26px;
+    line-height: 24px;
+}
+
+/* Admin columns styling */
+.wcmls-stock-table.admin-view th:nth-child(2),
+.wcmls-stock-table.admin-view td:nth-child(2) {
+    background-color: #f8f8f8;
+    border-left: 2px solid #ddd;
+    border-right: 2px solid #ddd;
+}
+
+/* Debug mode styling */
+.wcmls-debug-info {
+    background: #ffffcc;
+    padding: 5px;
+    margin: 5px 0;
+    border: 1px solid #e6db55;
+    font-family: monospace;
+    font-size: 12px;
+}
+
+/* Контейнер для таблицы с горизонтальным скроллингом */
+.wcmls-table-wrapper {
+    width: 100%;
+    overflow-x: auto;
+    overflow-y: visible;
+    margin-bottom: 20px;
+    border: 1px solid #ccd0d4;
+    background: #fff;
+    box-shadow: 0 1px 1px rgba(0,0,0,.04);
+    position: relative;
+}
+
+/* Убрать fixed у таблицы для корректной работы скроллинга */
+.wcmls-table-wrapper .wp-list-table {
+    table-layout: auto;
+    min-width: 100%;
+    width: max-content;
+}
+
+/* Стили для первого столбца (зафиксированный) */
+.wcmls-table-wrapper th:first-child,
+.wcmls-table-wrapper td:first-child {
+    position: sticky;
+    left: 0;
+    background: #fff;
+    z-index: 10;
+    border-right: 2px solid #ccd0d4;
+    min-width: 200px;
+}
+
+/* Тень для зафиксированного столбца при скроллинге */
+.wcmls-table-wrapper th:first-child::after,
+.wcmls-table-wrapper td:first-child::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    right: -5px;
+    bottom: 0;
+    width: 5px;
+    background: linear-gradient(to right, rgba(0,0,0,0.1), transparent);
+    opacity: 0;
+    transition: opacity 0.3s;
+}
+
+/* Показать тень при скроллинге */
+.wcmls-table-scrolled th:first-child::after,
+.wcmls-table-scrolled td:first-child::after {
+    opacity: 1;
+}
+
+/* Минимальная ширина для столбцов */
+.wcmls-table-wrapper th,
+.wcmls-table-wrapper td {
+    min-width: 150px;
+    white-space: nowrap;
+}
+
+/* Столбец "Общий запас WC" и "Сумма по локациям" */
+.wcmls-table-wrapper th:nth-child(2),
+.wcmls-table-wrapper td:nth-child(2),
+.wcmls-table-wrapper th:nth-child(3),
+.wcmls-table-wrapper td:nth-child(3) {
+    min-width: 120px;
+    font-weight: bold;
+}
+
+/* Стили для мобильных устройств */
+@media screen and (max-width: 782px) {
+    .wcmls-table-wrapper {
+        margin: 0 -20px;
+        width: calc(100% + 40px);
+        border-left: none;
+        border-right: none;
+    }
+    
+    .wcmls-table-wrapper th:first-child,
+    .wcmls-table-wrapper td:first-child {
+        min-width: 150px;
+    }
+}
+
+/* Стили для контролов таблицы */
+.wcmls-table-controls {
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.wcmls-table-controls .wcmls-location-count {
+    margin-left: auto;
+    color: #666;
+    font-size: 13px;
+}
+
+/* Кнопки навигации */
+.wcmls-table-controls .button {
+    min-width: 100px;
+}
+
+.wcmls-table-controls .button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* Заголовки таблицы остаются видимыми при скролле */
+.wcmls-table-wrapper thead th {
+    position: sticky;
+    top: 0;
+    background: #f9f9f9;
+    z-index: 11;
+    box-shadow: 0 2px 2px -1px rgba(0, 0, 0, 0.1);
+}
+
+/* Первая ячейка заголовка с более высоким z-index */
+.wcmls-table-wrapper thead th:first-child {
+    z-index: 12;
+    background: #f9f9f9;
+}';
     }
     
     public function validate_cart_location() {
@@ -1423,9 +1978,109 @@ class WC_Multi_Location_Stock {
             $selected_location = $this->get_selected_location();
             if ($selected_location && isset($locations[$selected_location])) {
                 $fields['billing_city']['default'] = $locations[$selected_location]['name'];
+                
+                // Принудительно устанавливаем значение для текущей сессии
+                if (WC()->customer) {
+                    // Проверяем, если город не установлен или не соответствует нашим локациям
+                    $current_city = WC()->customer->get_billing_city();
+                    $valid_city = false;
+                    foreach ($locations as $loc_id => $loc) {
+                        if ($loc['name'] === $current_city) {
+                            $valid_city = true;
+                            break;
+                        }
+                    }
+                    
+                    // Если текущий город недействителен, устанавливаем из выбранной локации
+                    if (!$valid_city) {
+                        WC()->customer->set_billing_city($locations[$selected_location]['name']);
+                    }
+                }
             }
+            
+            // Делаем поле обязательным
+            $fields['billing_city']['required'] = true;
         }
         
+        return $fields;
+    }
+    
+    public function set_checkout_city_value($value, $input) {
+        // Устанавливаем значение города из выбранной локации
+        if ($input === 'billing_city') {
+            $selected_location = $this->get_selected_location();
+            if ($selected_location && isset($this->locations[$selected_location])) {
+                // Если значение еще не установлено, используем выбранную локацию
+                if (empty($value)) {
+                    $value = $this->locations[$selected_location]['name'];
+                }
+            }
+        }
+        return $value;
+    }
+    
+    public function init_checkout_city($checkout) {
+        // Инициализируем город при загрузке страницы оформления заказа
+        $selected_location = $this->get_selected_location();
+        if ($selected_location && isset($this->locations[$selected_location])) {
+            $location_name = $this->locations[$selected_location]['name'];
+            
+            // Устанавливаем город в объекте клиента WooCommerce
+            if (WC()->customer) {
+                WC()->customer->set_billing_city($location_name);
+            }
+            
+            // Устанавливаем значение в сессии
+            if (WC()->session) {
+                WC()->session->set('billing_city', $location_name);
+            }
+            
+            // Логирование для отладки
+            if (defined('WCMLS_DEBUG') && WCMLS_DEBUG) {
+                error_log("WCMLS: Setting checkout city to '$location_name' for location '$selected_location'");
+            }
+        }
+    }
+    
+    public function validate_checkout_location($data, $errors) {
+        // Проверяем, что город соответствует одной из наших локаций
+        if (isset($data['billing_city']) && !empty($data['billing_city'])) {
+            $valid_city = false;
+            foreach ($this->locations as $location_id => $location) {
+                if ($location['name'] === $data['billing_city']) {
+                    $valid_city = true;
+                    break;
+                }
+            }
+            
+            if (!$valid_city) {
+                $errors->add('validation', __('Пожалуйста, выберите корректную локацию из списка.', 'wc-multi-location-stock'));
+            }
+        } else {
+            $errors->add('validation', __('Пожалуйста, выберите локацию доставки.', 'wc-multi-location-stock'));
+        }
+    }
+    
+    public function save_location_on_checkout_update($post_data) {
+        // Парсим данные формы
+        parse_str($post_data, $data);
+        
+        // Если есть город в данных, сохраняем его в сессии
+        if (isset($data['billing_city']) && !empty($data['billing_city'])) {
+            if (WC()->customer) {
+                WC()->customer->set_billing_city($data['billing_city']);
+            }
+            if (WC()->session) {
+                WC()->session->set('billing_city', $data['billing_city']);
+            }
+        }
+    }
+    
+    public function make_city_field_required($fields) {
+        // Делаем поле города обязательным
+        if (isset($fields['billing']['billing_city'])) {
+            $fields['billing']['billing_city']['required'] = true;
+        }
         return $fields;
     }
     
@@ -1448,7 +2103,24 @@ class WC_Multi_Location_Stock {
             }
         }
         
-        if (!$location_id) return;
+        // Если локация не найдена по городу, пробуем получить из сессии
+        if (!$location_id) {
+            $selected_location = $this->get_selected_location();
+            if ($selected_location && isset($this->locations[$selected_location])) {
+                $location_id = $selected_location;
+                // Обновляем город в заказе для консистентности
+                $order->set_billing_city($this->locations[$selected_location]['name']);
+                $order->save();
+            }
+        }
+        
+        if (!$location_id) {
+            // Логируем проблему
+            if (defined('WCMLS_DEBUG') && WCMLS_DEBUG) {
+                error_log("WCMLS: Cannot determine location for order #$order_id, billing_city: $billing_city");
+            }
+            return;
+        }
         
         // Reduce stock for each item
         foreach ($order->get_items() as $item) {
@@ -1460,14 +2132,22 @@ class WC_Multi_Location_Stock {
             $new_stock = max(0, $current_stock - $quantity);
             
             $this->update_location_stock($product_id, $location_id, $new_stock);
-            
-            // Note: WooCommerce already handles the total stock reduction automatically
+        }
+        
+        // После уменьшения запасов локации, синхронизировать общие запасы
+        foreach ($order->get_items() as $item) {
+            $this->sync_total_stock($item->get_product_id());
         }
         
         // Mark order as processed
         $order->update_meta_data('_wcmls_stock_processed', true);
         $order->update_meta_data('_wcmls_location', $location_id);
         $order->save();
+        
+        // Логирование успешной обработки
+        if (defined('WCMLS_DEBUG') && WCMLS_DEBUG) {
+            error_log("WCMLS: Successfully processed stock for order #$order_id at location '$location_id' ({$this->locations[$location_id]['name']})");
+        }
     }
     
     public function restore_order_stock($order_id) {
@@ -1502,13 +2182,34 @@ class WC_Multi_Location_Stock {
             $new_stock = $current_stock + $quantity;
             
             $this->update_location_stock($product_id, $location_id, $new_stock);
-            
-            // Note: WooCommerce already handles the total stock restoration automatically
+        }
+        
+        // После восстановления запасов локации, синхронизировать общие запасы
+        foreach ($order->get_items() as $item) {
+            $this->sync_total_stock($item->get_product_id());
         }
         
         // Remove processed flag
         $order->delete_meta_data('_wcmls_stock_processed');
         $order->save();
+    }
+    
+    public function sync_stock_on_order_complete($order_id) {
+        $order = wc_get_order($order_id);
+        if (!$order) return;
+        
+        // Синхронизируем запасы для всех товаров в заказе
+        // Вызывается при статусах "completed" и "processing"
+        foreach ($order->get_items() as $item) {
+            $product_id = $item->get_product_id();
+            $this->sync_total_stock($product_id);
+        }
+        
+        // Логирование для отладки
+        if (defined('WCMLS_DEBUG') && WCMLS_DEBUG) {
+            $status = $order->get_status();
+            error_log("WCMLS: Synced stock for order #$order_id with status: $status");
+        }
     }
     
     public function filter_orders_for_location_manager($query) {
@@ -1603,22 +2304,24 @@ function wcmls_init() {
 }
 add_action('plugins_loaded', 'wcmls_init', 11); // Load after WooCommerce
 
-// Create frontend.js file content
+// Create frontend.js file on init
 add_action('init', function() {
     $js_dir = plugin_dir_path(__FILE__) . 'assets/js/';
-    $css_dir = plugin_dir_path(__FILE__) . 'assets/css/';
     
     if (!file_exists($js_dir)) {
         wp_mkdir_p($js_dir);
     }
     
-    if (!file_exists($css_dir)) {
-        wp_mkdir_p($css_dir);
+    // Frontend JS with proper error handling
+    $frontend_js = 'jQuery(document).ready(function($) {
+    // Проверяем, что wcmls_ajax определен
+    if (typeof wcmls_ajax === "undefined") {
+        console.error("wcmls_ajax is not defined!");
+        return;
     }
     
-    $frontend_js = 'jQuery(document).ready(function($) {
-    // Handle location selection
-    $("#wcmls-location").on("change", function() {
+    // Handle location selection with event delegation
+    $(document).on("change", "#wcmls-location", function() {
         var location = $(this).val();
         
         if (!location) {
@@ -1636,9 +2339,23 @@ add_action('init', function() {
             },
             success: function(response) {
                 if (response.success) {
+                    // Если мы на странице оформления заказа, обновляем поле города
+                    if ($("#billing_city").length > 0 && response.data.location_name) {
+                        $("#billing_city").val(response.data.location_name);
+                        $("#billing_city").trigger("change");
+                    }
+                    
                     alert(wcmls_ajax.strings.location_changed);
-                    location.reload();
+                    
+                    // Перезагружаем страницу только если не на странице оформления заказа
+                    if (!$("body").hasClass("woocommerce-checkout")) {
+                        window.location.reload();
+                    }
                 }
+            },
+            error: function(xhr, status, error) {
+                console.error("AJAX error:", status, error);
+                alert("Ошибка при изменении локации. Попробуйте еще раз.");
             }
         });
     });
@@ -1651,6 +2368,39 @@ add_action('init', function() {
             return false;
         }
     });
+    
+    // Синхронизация города на странице оформления заказа при загрузке
+    if ($("body").hasClass("woocommerce-checkout")) {
+        // Проверяем, есть ли выбранная локация
+        var selectedLocation = document.cookie.match(/wcmls_selected_location=([^;]+)/);
+        if (selectedLocation && selectedLocation[1]) {
+            // Ждем загрузки формы
+            $(document).on("ready updated_checkout", function() {
+                setTimeout(function() {
+                    var billingCity = $("#billing_city");
+                    if (billingCity.length > 0) {
+                        // Если есть выбранная локация
+                        if (wcmls_ajax.selected_location_name) {
+                            billingCity.val(wcmls_ajax.selected_location_name);
+                            billingCity.trigger("change");
+                        } else if (window.wcmls_selected_location_name) {
+                            // Fallback to global variable
+                            billingCity.val(window.wcmls_selected_location_name);
+                            billingCity.trigger("change");
+                        } else if (billingCity.val() === "") {
+                            // Если поле пустое, попробуем установить первое доступное значение
+                            billingCity.find("option").each(function() {
+                                if ($(this).val() !== "" && !billingCity.val()) {
+                                    billingCity.val($(this).val()).trigger("change");
+                                    return false;
+                                }
+                            });
+                        }
+                    }
+                }, 500); // Небольшая задержка для загрузки формы
+            });
+        }
+    }
 });';
     
     $admin_css = '.wcmls-location-selector {
@@ -1727,8 +2477,130 @@ add_action('init', function() {
     border: 1px solid #e6db55;
     font-family: monospace;
     font-size: 12px;
+}
+
+/* Контейнер для таблицы с горизонтальным скроллингом */
+.wcmls-table-wrapper {
+    width: 100%;
+    overflow-x: auto;
+    overflow-y: visible;
+    margin-bottom: 20px;
+    border: 1px solid #ccd0d4;
+    background: #fff;
+    box-shadow: 0 1px 1px rgba(0,0,0,.04);
+    position: relative;
+}
+
+/* Убрать fixed у таблицы для корректной работы скроллинга */
+.wcmls-table-wrapper .wp-list-table {
+    table-layout: auto;
+    min-width: 100%;
+    width: max-content;
+}
+
+/* Стили для первого столбца (зафиксированный) */
+.wcmls-table-wrapper th:first-child,
+.wcmls-table-wrapper td:first-child {
+    position: sticky;
+    left: 0;
+    background: #fff;
+    z-index: 10;
+    border-right: 2px solid #ccd0d4;
+    min-width: 200px;
+}
+
+/* Тень для зафиксированного столбца при скроллинге */
+.wcmls-table-wrapper th:first-child::after,
+.wcmls-table-wrapper td:first-child::after {
+    content: \'\';
+    position: absolute;
+    top: 0;
+    right: -5px;
+    bottom: 0;
+    width: 5px;
+    background: linear-gradient(to right, rgba(0,0,0,0.1), transparent);
+    opacity: 0;
+    transition: opacity 0.3s;
+}
+
+/* Показать тень при скроллинге */
+.wcmls-table-scrolled th:first-child::after,
+.wcmls-table-scrolled td:first-child::after {
+    opacity: 1;
+}
+
+/* Минимальная ширина для столбцов */
+.wcmls-table-wrapper th,
+.wcmls-table-wrapper td {
+    min-width: 150px;
+    white-space: nowrap;
+}
+
+/* Столбец "Общий запас WC" и "Сумма по локациям" */
+.wcmls-table-wrapper th:nth-child(2),
+.wcmls-table-wrapper td:nth-child(2),
+.wcmls-table-wrapper th:nth-child(3),
+.wcmls-table-wrapper td:nth-child(3) {
+    min-width: 120px;
+    font-weight: bold;
+}
+
+/* Стили для мобильных устройств */
+@media screen and (max-width: 782px) {
+    .wcmls-table-wrapper {
+        margin: 0 -20px;
+        width: calc(100% + 40px);
+        border-left: none;
+        border-right: none;
+    }
+    
+    .wcmls-table-wrapper th:first-child,
+    .wcmls-table-wrapper td:first-child {
+        min-width: 150px;
+    }
+}
+
+/* Стили для контролов таблицы */
+.wcmls-table-controls {
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.wcmls-table-controls .wcmls-location-count {
+    margin-left: auto;
+    color: #666;
+    font-size: 13px;
+}
+
+/* Кнопки навигации */
+.wcmls-table-controls .button {
+    min-width: 100px;
+}
+
+.wcmls-table-controls .button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* Заголовки таблицы остаются видимыми при скролле */
+.wcmls-table-wrapper thead th {
+    position: sticky;
+    top: 0;
+    background: #f9f9f9;
+    z-index: 11;
+    box-shadow: 0 2px 2px -1px rgba(0, 0, 0, 0.1);
+}
+
+/* Первая ячейка заголовка с более высоким z-index */
+.wcmls-table-wrapper thead th:first-child {
+    z-index: 12;
+    background: #f9f9f9;
 }';
     
-    file_put_contents($js_dir . 'frontend.js', $frontend_js);
-    file_put_contents($css_dir . 'admin.css', $admin_css);
+    // Only create frontend.js if it doesn\'t exist
+    if (!file_exists($js_dir . 'frontend.js')) {
+        file_put_contents($js_dir . 'frontend.js', $frontend_js);
+    }
 });
