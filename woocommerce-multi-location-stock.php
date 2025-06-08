@@ -3,7 +3,7 @@
  * Plugin Name: WooCommerce Multi-Location Stock
  * Plugin URI: https://biznesonay.kz/
  * Description: Управление складом по локациям для WooCommerce с ролью Менеджер Локации
- * Version: 2.0.0
+ * Version: 2.0.1
  * Author: BiznesOnay
  * Text Domain: wc-multi-location-stock
  * Domain Path: /languages
@@ -13,6 +13,8 @@
  * WC tested up to: 9.8.5
  * 
  * Changelog:
+ * 2.0.1 - Fixed infinite jQuery loading on checkout page
+ * 2.0.0 - Added automatic city ID generation from name
  * 1.7.0 - Added automatic city sync on checkout, stock sync on order completion
  * 1.6.3 - Fixed location selection and JS errors
  * 1.6.2 - Added total stock synchronization functionality
@@ -46,7 +48,7 @@ class WC_Multi_Location_Stock {
     }
     
     private function define_constants() {
-        define('WCMLS_VERSION', '2.0.0');
+        define('WCMLS_VERSION', '2.0.1');
         define('WCMLS_PLUGIN_URL', plugin_dir_url(__FILE__));
         define('WCMLS_PLUGIN_PATH', plugin_dir_path(__FILE__));
         
@@ -92,7 +94,6 @@ class WC_Multi_Location_Stock {
         add_filter('woocommerce_checkout_get_value', [$this, 'set_checkout_city_value'], 10, 2);
         add_action('woocommerce_checkout_init', [$this, 'init_checkout_city']);
         add_action('woocommerce_after_checkout_validation', [$this, 'validate_checkout_location'], 10, 2);
-        add_action('woocommerce_checkout_update_order_review', [$this, 'save_location_on_checkout_update']);
         add_filter('woocommerce_checkout_fields', [$this, 'make_city_field_required']);
         
         // Ajax handlers
@@ -164,48 +165,12 @@ class WC_Multi_Location_Stock {
                 }
             }
             
-            if (version_compare($current_version, '1.7.1', '<')) {
-                // Ensure CSS files are updated for scrolling functionality
-                $css_file = WCMLS_PLUGIN_PATH . 'assets/css/admin.css';
-                if (file_exists($css_file)) {
-                    // Force CSS file recreation
-                    @unlink($css_file);
+            if (version_compare($current_version, '2.0.1', '<')) {
+                // Force JS file recreation to fix infinite loading
+                $js_file = WCMLS_PLUGIN_PATH . 'assets/js/frontend.js';
+                if (file_exists($js_file)) {
+                    @unlink($js_file);
                 }
-            }
-            
-            if (version_compare($current_version, '1.8.0', '<')) {
-                // Force CSS update for enhanced scrolling features
-                $css_file = WCMLS_PLUGIN_PATH . 'assets/css/admin.css';
-                if (file_exists($css_file)) {
-                    @unlink($css_file);
-                }
-            }
-            
-            if (version_compare($current_version, '1.8.1', '<')) {
-                // Force CSS update to remove scroll indicator
-                $css_file = WCMLS_PLUGIN_PATH . 'assets/css/admin.css';
-                if (file_exists($css_file)) {
-                    @unlink($css_file);
-                }
-            }
-            
-            if (version_compare($current_version, '1.9.0', '<')) {
-                // Force CSS update for error styles
-                $css_file = WCMLS_PLUGIN_PATH . 'assets/css/admin.css';
-                if (file_exists($css_file)) {
-                    @unlink($css_file);
-                }
-            }
-            
-            if (version_compare($current_version, '2.0.0', '<')) {
-                // Major update notification
-                add_action('admin_notices', function() {
-                    echo '<div class="notice notice-info is-dismissible"><p><strong>' . 
-                         __('WooCommerce Multi-Location Stock обновлен до версии 2.0.0!', 'wc-multi-location-stock') . 
-                         '</strong> ' . 
-                         __('Теперь ID локации генерируется автоматически из названия.', 'wc-multi-location-stock') . 
-                         '</p></div>';
-                });
             }
             
             // Update version
@@ -533,7 +498,7 @@ class WC_Multi_Location_Stock {
             <div class="notice notice-info">
                 <p><?php _e('Шорткод для выбора локации:', 'wc-multi-location-stock'); ?> <code>[location_selector]</code></p>
                 <p><?php _e('Вставьте этот шорткод на любую страницу, где покупатели должны выбирать свою локацию.', 'wc-multi-location-stock'); ?></p>
-                <p><strong><?php _e('Новое в версии 2.0.0:', 'wc-multi-location-stock'); ?></strong> <?php _e('ID локации теперь генерируется автоматически из названия с поддержкой русского и казахского алфавитов.', 'wc-multi-location-stock'); ?></p>
+                <p><strong><?php _e('Новое в версии 2.0.1:', 'wc-multi-location-stock'); ?></strong> <?php _e('Исправлена проблема с бесконечной загрузкой jQuery на странице оформления заказа.', 'wc-multi-location-stock'); ?></p>
             </div>
             
             <form method="post" action="">
@@ -551,7 +516,7 @@ class WC_Multi_Location_Stock {
                             <th><?php _e('Действия', 'wc-multi-location-stock'); ?></th>
                         </tr>
                     </thead>
-                    <tbody id="locations-list"><?php echo ' '; // Добавлен ID для JavaScript ?>
+                    <tbody id="locations-list">
                         <?php if (!empty($locations)): ?>
                             <?php foreach ($locations as $location_id => $location): ?>
                                 <tr>
@@ -968,7 +933,7 @@ class WC_Multi_Location_Stock {
             </div>
             
             <div class="wcmls-table-wrapper">
-                <table class="wp-list-table widefat striped wcmls-stock-table <?php echo $is_admin ? 'admin-view' : ''; ?>"><?php echo ' '; // Убрали fixed для правильной работы скроллинга ?>
+                <table class="wp-list-table widefat striped wcmls-stock-table <?php echo $is_admin ? 'admin-view' : ''; ?>">
                     <thead>
                         <tr>
                             <th><?php _e('Товар', 'wc-multi-location-stock'); ?></th>
@@ -1916,6 +1881,34 @@ class WC_Multi_Location_Stock {
             return false;
         }
     });
+    
+    // Флаг для предотвращения рекурсивных обновлений
+    var cityUpdateInProgress = false;
+    
+    // Синхронизация города на странице оформления заказа
+    if ($("body").hasClass("woocommerce-checkout")) {
+        // Функция для установки города
+        function setCheckoutCity() {
+            if (cityUpdateInProgress) return;
+            
+            var billingCity = $("#billing_city");
+            if (billingCity.length > 0 && wcmls_ajax.selected_location_name) {
+                cityUpdateInProgress = true;
+                billingCity.val(wcmls_ajax.selected_location_name);
+                
+                // Небольшая задержка перед снятием флага
+                setTimeout(function() {
+                    cityUpdateInProgress = false;
+                }, 100);
+            }
+        }
+        
+        // Устанавливаем город при загрузке страницы
+        setCheckoutCity();
+        
+        // Не реагируем на событие updated_checkout чтобы избежать циклов
+        // Вместо этого просто устанавливаем значение один раз при загрузке
+    }
 });';
         
         file_put_contents(WCMLS_PLUGIN_PATH . 'assets/js/frontend.js', $frontend_js);
@@ -2269,21 +2262,6 @@ class WC_Multi_Location_Stock {
         }
     }
     
-    public function save_location_on_checkout_update($post_data) {
-        // Парсим данные формы
-        parse_str($post_data, $data);
-        
-        // Если есть город в данных, сохраняем его в сессии
-        if (isset($data['billing_city']) && !empty($data['billing_city'])) {
-            if (WC()->customer) {
-                WC()->customer->set_billing_city($data['billing_city']);
-            }
-            if (WC()->session) {
-                WC()->session->set('billing_city', $data['billing_city']);
-            }
-        }
-    }
-    
     public function make_city_field_required($fields) {
         // Делаем поле города обязательным
         if (isset($fields['billing']['billing_city'])) {
@@ -2512,7 +2490,7 @@ function wcmls_init() {
 }
 add_action('plugins_loaded', 'wcmls_init', 11); // Load after WooCommerce
 
-// Create frontend.js file on init
+// Create or update frontend.js file on init
 add_action('init', function() {
     $js_dir = plugin_dir_path(__FILE__) . 'assets/js/';
     
@@ -2520,7 +2498,7 @@ add_action('init', function() {
         wp_mkdir_p($js_dir);
     }
     
-    // Frontend JS with proper error handling
+    // Force update the frontend.js file with the fixed version
     $frontend_js = 'jQuery(document).ready(function($) {
     // Проверяем, что wcmls_ajax определен
     if (typeof wcmls_ajax === "undefined") {
@@ -2577,238 +2555,36 @@ add_action('init', function() {
         }
     });
     
-    // Синхронизация города на странице оформления заказа при загрузке
+    // Флаг для предотвращения рекурсивных обновлений
+    var cityUpdateInProgress = false;
+    
+    // Синхронизация города на странице оформления заказа
     if ($("body").hasClass("woocommerce-checkout")) {
-        // Проверяем, есть ли выбранная локация
-        var selectedLocation = document.cookie.match(/wcmls_selected_location=([^;]+)/);
-        if (selectedLocation && selectedLocation[1]) {
-            // Ждем загрузки формы
-            $(document).on("ready updated_checkout", function() {
+        // Функция для установки города
+        function setCheckoutCity() {
+            if (cityUpdateInProgress) return;
+            
+            var billingCity = $("#billing_city");
+            if (billingCity.length > 0 && wcmls_ajax.selected_location_name) {
+                cityUpdateInProgress = true;
+                billingCity.val(wcmls_ajax.selected_location_name);
+                
+                // Небольшая задержка перед снятием флага
                 setTimeout(function() {
-                    var billingCity = $("#billing_city");
-                    if (billingCity.length > 0) {
-                        // Если есть выбранная локация
-                        if (wcmls_ajax.selected_location_name) {
-                            billingCity.val(wcmls_ajax.selected_location_name);
-                            billingCity.trigger("change");
-                        } else if (window.wcmls_selected_location_name) {
-                            // Fallback to global variable
-                            billingCity.val(window.wcmls_selected_location_name);
-                            billingCity.trigger("change");
-                        } else if (billingCity.val() === "") {
-                            // Если поле пустое, попробуем установить первое доступное значение
-                            billingCity.find("option").each(function() {
-                                if ($(this).val() !== "" && !billingCity.val()) {
-                                    billingCity.val($(this).val()).trigger("change");
-                                    return false;
-                                }
-                            });
-                        }
-                    }
-                }, 500); // Небольшая задержка для загрузки формы
-            });
+                    cityUpdateInProgress = false;
+                }, 100);
+            }
         }
+        
+        // Устанавливаем город при загрузке страницы
+        setCheckoutCity();
+        
+        // Не реагируем на событие updated_checkout чтобы избежать циклов
+        // Вместо этого просто устанавливаем значение один раз при загрузке
     }
 });';
     
-    $admin_css = '.wcmls-location-selector {
-    margin: 20px 0;
-    padding: 15px;
-    background: #f5f5f5;
-    border: 1px solid #ddd;
-}
-
-.wcmls-location-selector select {
-    width: 100%;
-    max-width: 300px;
-}
-
-.wcmls-current-location {
-    margin-top: 10px;
-    font-weight: bold;
-}
-
-.location-stock-input {
-    width: 80px;
-}
-
-.location-stock-input[readonly] {
-    background-color: #f0f0f0;
-}
-
-.location-stock-change {
-    width: 80px !important;
-}
-
-.current-stock {
-    font-size: 16px;
-    padding: 5px 10px;
-    display: inline-block;
-    min-width: 40px;
-    text-align: center;
-    border-radius: 3px;
-    background: #f0f0f0;
-}
-
-.apply-stock-change {
-    margin-left: 5px;
-}
-
-/* Better table layout for stock management */
-.wp-list-table.wcmls-stock-table th,
-.wp-list-table.wcmls-stock-table td {
-    vertical-align: middle;
-}
-
-.wp-list-table.wcmls-stock-table th:first-child {
-    width: 30%;
-}
-
-.wp-list-table.wcmls-stock-table .button-small {
-    height: 26px;
-    line-height: 24px;
-}
-
-/* Admin columns styling */
-.wcmls-stock-table.admin-view th:nth-child(2),
-.wcmls-stock-table.admin-view td:nth-child(2) {
-    background-color: #f8f8f8;
-    border-left: 2px solid #ddd;
-    border-right: 2px solid #ddd;
-}
-
-/* Debug mode styling */
-.wcmls-debug-info {
-    background: #ffffcc;
-    padding: 5px;
-    margin: 5px 0;
-    border: 1px solid #e6db55;
-    font-family: monospace;
-    font-size: 12px;
-}
-
-/* Контейнер для таблицы с горизонтальным скроллингом */
-.wcmls-table-wrapper {
-    width: 100%;
-    overflow-x: auto;
-    overflow-y: visible;
-    margin-bottom: 20px;
-    border: 1px solid #ccd0d4;
-    background: #fff;
-    box-shadow: 0 1px 1px rgba(0,0,0,.04);
-    position: relative;
-}
-
-/* Убрать fixed у таблицы для корректной работы скроллинга */
-.wcmls-table-wrapper .wp-list-table {
-    table-layout: auto;
-    min-width: 100%;
-    width: max-content;
-}
-
-/* Стили для первого столбца (зафиксированный) */
-.wcmls-table-wrapper th:first-child,
-.wcmls-table-wrapper td:first-child {
-    position: sticky;
-    left: 0;
-    background: #fff;
-    z-index: 10;
-    border-right: 2px solid #ccd0d4;
-    min-width: 200px;
-}
-
-/* Тень для зафиксированного столбца при скроллинге */
-.wcmls-table-wrapper th:first-child::after,
-.wcmls-table-wrapper td:first-child::after {
-    content: \'\';
-    position: absolute;
-    top: 0;
-    right: -5px;
-    bottom: 0;
-    width: 5px;
-    background: linear-gradient(to right, rgba(0,0,0,0.1), transparent);
-    opacity: 0;
-    transition: opacity 0.3s;
-}
-
-/* Показать тень при скроллинге */
-.wcmls-table-scrolled th:first-child::after,
-.wcmls-table-scrolled td:first-child::after {
-    opacity: 1;
-}
-
-/* Минимальная ширина для столбцов */
-.wcmls-table-wrapper th,
-.wcmls-table-wrapper td {
-    min-width: 150px;
-    white-space: nowrap;
-}
-
-/* Столбец "Общий запас WC" и "Сумма по локациям" */
-.wcmls-table-wrapper th:nth-child(2),
-.wcmls-table-wrapper td:nth-child(2),
-.wcmls-table-wrapper th:nth-child(3),
-.wcmls-table-wrapper td:nth-child(3) {
-    min-width: 120px;
-    font-weight: bold;
-}
-
-/* Стили для мобильных устройств */
-@media screen and (max-width: 782px) {
-    .wcmls-table-wrapper {
-        margin: 0 -20px;
-        width: calc(100% + 40px);
-        border-left: none;
-        border-right: none;
-    }
-    
-    .wcmls-table-wrapper th:first-child,
-    .wcmls-table-wrapper td:first-child {
-        min-width: 150px;
-    }
-}
-
-/* Стили для контролов таблицы */
-.wcmls-table-controls {
-    margin-bottom: 10px;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-}
-
-.wcmls-table-controls .wcmls-location-count {
-    margin-left: auto;
-    color: #666;
-    font-size: 13px;
-}
-
-/* Кнопки навигации */
-.wcmls-table-controls .button {
-    min-width: 100px;
-}
-
-.wcmls-table-controls .button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-}
-
-/* Заголовки таблицы остаются видимыми при скролле */
-.wcmls-table-wrapper thead th {
-    position: sticky;
-    top: 0;
-    background: #f9f9f9;
-    z-index: 11;
-    box-shadow: 0 2px 2px -1px rgba(0, 0, 0, 0.1);
-}
-
-/* Первая ячейка заголовка с более высоким z-index */
-.wcmls-table-wrapper thead th:first-child {
-    z-index: 12;
-    background: #f9f9f9;
-}';
-    
-    // Only create frontend.js if it doesn\'t exist
-    if (!file_exists($js_dir . 'frontend.js')) {
-        file_put_contents($js_dir . 'frontend.js', $frontend_js);
-    }
+    // Always recreate the file to ensure it has the latest version
+    file_put_contents($js_dir . 'frontend.js', $frontend_js);
 });
+?>
