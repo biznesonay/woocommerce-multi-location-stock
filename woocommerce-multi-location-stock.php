@@ -293,8 +293,8 @@ class WC_Multi_Location_Stock {
         if (current_user_can('manage_woocommerce')) {
             add_submenu_page(
                 'woocommerce',
-                __('Multi-Location Stock', 'wc-multi-location-stock'),
-                __('Multi-Location Stock', 'wc-multi-location-stock'),
+                __('Локации', 'wc-multi-location-stock'),
+                __('Локации', 'wc-multi-location-stock'),
                 'manage_woocommerce',
                 'wcmls-settings',
                 [$this, 'settings_page']
