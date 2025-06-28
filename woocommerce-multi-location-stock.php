@@ -3,7 +3,7 @@
  * Plugin Name: WooCommerce Multi-Location Stock
  * Plugin URI: https://biznesonay.kz/
  * Description: Управление складом по локациям для WooCommerce с ролью Менеджер Локации
- * Version: 2.0.1
+ * Version: 2.0.2
  * Author: BiznesOnay
  * Text Domain: wc-multi-location-stock
  * Domain Path: /languages
@@ -13,6 +13,7 @@
  * WC tested up to: 9.8.5
  * 
  * Changelog:
+ * 2.0.2 - Added product management access for location managers, fixed admin access restrictions
  * 2.0.1 - Fixed infinite jQuery loading on checkout page
  * 2.0.0 - Added automatic city ID generation from name
  * 1.7.0 - Added automatic city sync on checkout, stock sync on order completion
@@ -48,7 +49,7 @@ class WC_Multi_Location_Stock {
     }
     
     private function define_constants() {
-        define('WCMLS_VERSION', '2.0.1');
+        define('WCMLS_VERSION', '2.0.2');
         define('WCMLS_PLUGIN_URL', plugin_dir_url(__FILE__));
         define('WCMLS_PLUGIN_PATH', plugin_dir_path(__FILE__));
         
@@ -68,7 +69,13 @@ class WC_Multi_Location_Stock {
         
         add_action('init', [$this, 'init']);
         add_action('admin_menu', [$this, 'add_admin_menu'], 99);
+        
+        // ВАЖНО: Перенесли скрытие меню в отдельный хук с правильным приоритетом
+        add_action('admin_menu', [$this, 'hide_admin_menu_for_location_manager'], 999);
+        
+        // Ограничение доступа должно быть на admin_init
         add_action('admin_init', [$this, 'restrict_admin_access']);
+        
         add_filter('woocommerce_product_get_stock_quantity', [$this, 'get_location_stock'], 10, 2);
         add_filter('woocommerce_product_is_in_stock', [$this, 'check_location_stock'], 10, 2);
         add_action('woocommerce_check_cart_items', [$this, 'validate_cart_location']);
@@ -112,6 +119,16 @@ class WC_Multi_Location_Stock {
         // Initialize location stock for new products
         add_action('woocommerce_new_product', [$this, 'init_stock_for_product']);
         add_action('woocommerce_update_product', [$this, 'maybe_init_stock_for_product']);
+        
+        // Скрытие действий удаления для менеджеров локаций
+        add_filter('post_row_actions', [$this, 'filter_product_row_actions'], 10, 2);
+        add_filter('bulk_actions-edit-product', [$this, 'filter_product_bulk_actions']);
+        
+        // CSS для скрытия элементов интерфейса
+        add_action('admin_head', [$this, 'admin_custom_css']);
+        
+        // Изменение кнопки "Новый" в админ-баре
+        add_action('admin_bar_menu', [$this, 'modify_admin_bar_new_button'], 999);
     }
     
     public function activate() {
@@ -173,25 +190,87 @@ class WC_Multi_Location_Stock {
                 }
             }
             
+            if (version_compare($current_version, '2.0.2', '<')) {
+                // Update role capabilities for product management
+                $this->update_existing_location_managers();
+            }
+            
             // Update version
             update_option('wcmls_version', WCMLS_VERSION);
         }
     }
     
+    private function create_location_manager_role() {
+        $capabilities = [
+            'read' => true,
+            
+            // Заказы
+            'edit_shop_orders' => true,
+            'read_shop_order' => true,
+            'woocommerce_view_order' => true,
+            'woocommerce_edit_order' => true,
+            
+            // Товары - расширенные права
+            'edit_products' => true,
+            'edit_product' => true,
+            'read_product' => true,
+            'edit_others_products' => true,  // Для просмотра всех товаров
+            'publish_products' => true,       // Для публикации новых товаров
+            'edit_published_products' => true, // Для редактирования опубликованных товаров
+            'read_private_products' => true,
+            'upload_files' => true,           // Для загрузки изображений товаров
+            
+            // Категории и метки товаров
+            'manage_product_terms' => true,
+            'edit_product_terms' => true,
+            'assign_product_terms' => true,
+            
+            // Запрещаем удаление
+            'delete_products' => false,
+            'delete_product' => false,
+            'delete_private_products' => false,
+            'delete_published_products' => false,
+            'delete_others_products' => false,
+            'delete_product_terms' => false,
+            
+            // Общие WooCommerce
+            'view_admin_dashboard' => false,
+            'manage_woocommerce' => false,
+            'view_woocommerce_reports' => false,
+        ];
+        
+        // Удаляем старую роль если существует
+        remove_role('location_manager');
+        
+        // Создаем роль заново
+        add_role('location_manager', __('Менеджер Локации', 'wc-multi-location-stock'), $capabilities);
+    }
+    
     private function update_existing_location_managers() {
-        // Update capabilities for existing location managers
         $role = get_role('location_manager');
         if ($role) {
-            // Remove capabilities
-            $role->remove_cap('view_admin_dashboard');
-            $role->remove_cap('upload_files');
-            $role->remove_cap('publish_products');
-            $role->remove_cap('edit_published_products');
-            $role->remove_cap('manage_product_terms');
-            $role->remove_cap('edit_product_terms');
-            $role->remove_cap('assign_product_terms');
+            // Добавляем новые capabilities для работы с товарами
+            $role->add_cap('edit_products');
+            $role->add_cap('edit_product');
+            $role->add_cap('read_product');
+            $role->add_cap('edit_others_products');
+            $role->add_cap('publish_products');
+            $role->add_cap('edit_published_products');
+            $role->add_cap('read_private_products');
+            $role->add_cap('upload_files');
+            $role->add_cap('manage_product_terms');
+            $role->add_cap('edit_product_terms');
+            $role->add_cap('assign_product_terms');
             
-            // Add necessary capabilities
+            // Убеждаемся что удаление запрещено
+            $role->remove_cap('delete_products');
+            $role->remove_cap('delete_product');
+            $role->remove_cap('delete_private_products');
+            $role->remove_cap('delete_published_products');
+            $role->remove_cap('delete_others_products');
+            $role->remove_cap('delete_product_terms');
+            
+            // Сохраняем capabilities для заказов
             $role->add_cap('woocommerce_view_order');
             $role->add_cap('woocommerce_edit_order');
         }
@@ -199,40 +278,6 @@ class WC_Multi_Location_Stock {
     
     public function deactivate() {
         flush_rewrite_rules();
-    }
-    
-    private function create_location_manager_role() {
-        $capabilities = [
-            'read' => true,
-            'edit_shop_orders' => true,
-            'read_shop_order' => true,
-            'view_admin_dashboard' => false,
-            'manage_woocommerce' => false,
-            'view_woocommerce_reports' => false,
-            'edit_products' => true, // Needed for stock management
-            'edit_product' => true,
-            'read_product' => true,
-            'delete_product' => false,
-            'edit_others_products' => false,
-            'publish_products' => false,
-            'read_private_products' => true,
-            'delete_products' => false,
-            'delete_private_products' => false,
-            'delete_published_products' => false,
-            'delete_others_products' => false,
-            'edit_private_products' => false,
-            'edit_published_products' => false,
-            'manage_product_terms' => false,
-            'edit_product_terms' => false,
-            'delete_product_terms' => false,
-            'assign_product_terms' => false,
-            'upload_files' => false,
-            // Additional WooCommerce capabilities for orders
-            'woocommerce_view_order' => true,
-            'woocommerce_edit_order' => true,
-        ];
-        
-        add_role('location_manager', __('Менеджер Локации', 'wc-multi-location-stock'), $capabilities);
     }
     
     private function create_tables() {
@@ -314,135 +359,269 @@ class WC_Multi_Location_Stock {
         }
     }
     
-    public function show_orders_menu_for_location_manager() {
-        if (current_user_can('location_manager')) {
-            global $menu, $submenu;
+    // Новая отдельная функция для скрытия меню
+    public function hide_admin_menu_for_location_manager() {
+        // Проверяем, является ли пользователь менеджером локации
+        if (!$this->user_has_location_manager_role()) {
+            return;
+        }
+        
+        // Удаляем главные элементы меню (кроме товаров)
+        $restricted_menus = [
+            'index.php',              // Dashboard
+            'edit.php',              // Posts
+            // 'upload.php',         // Media - разрешаем для загрузки изображений товаров
+            'edit.php?post_type=page', // Pages
+            'edit-comments.php',     // Comments
+            'themes.php',            // Appearance
+            'plugins.php',           // Plugins
+            'users.php',             // Users
+            'tools.php',             // Tools
+            'options-general.php',   // Settings
+            // 'edit.php?post_type=product' // Products - НЕ удаляем
+        ];
+        
+        foreach ($restricted_menus as $menu) {
+            remove_menu_page($menu);
+        }
+        
+        // Удаляем подменю WooCommerce кроме разрешенных
+        remove_submenu_page('woocommerce', 'wc-admin');
+        remove_submenu_page('woocommerce', 'wc-reports');
+        remove_submenu_page('woocommerce', 'wc-settings');
+        remove_submenu_page('woocommerce', 'wc-status');
+        remove_submenu_page('woocommerce', 'wc-addons');
+        remove_submenu_page('woocommerce', 'wcmls-settings');
+        // НЕ удаляем товары из подменю
+        
+        // Фильтруем оставшиеся подменю
+        global $submenu;
+        if (isset($submenu['woocommerce'])) {
+            $allowed_submenus = [
+                'edit.php?post_type=shop_order',
+                'admin.php?page=wc-orders',
+                'wc-orders',
+                'wcmls-stock',
+                'edit.php?post_type=product', // Добавляем товары
+                'edit-tags.php?taxonomy=product_cat&post_type=product', // Категории
+                'edit-tags.php?taxonomy=product_tag&post_type=product', // Метки
+            ];
             
-            // Show WooCommerce menu
-            if (isset($menu['55.5'])) {
-                $menu['55.5'][1] = 'edit_shop_orders';
-            }
-            
-            // Show Orders submenu - check for HPOS
-            if (isset($submenu['woocommerce'])) {
-                foreach ($submenu['woocommerce'] as $key => $item) {
-                    // Check for both legacy and HPOS order pages
-                    if (strpos($item[2], 'edit.php?post_type=shop_order') !== false || 
-                        strpos($item[2], 'admin.php?page=wc-orders') !== false) {
-                        $submenu['woocommerce'][$key][1] = 'edit_shop_orders';
+            foreach ($submenu['woocommerce'] as $key => $item) {
+                $is_allowed = false;
+                foreach ($allowed_submenus as $allowed) {
+                    if (strpos($item[2], $allowed) !== false) {
+                        $is_allowed = true;
+                        break;
                     }
+                }
+                if (!$is_allowed) {
+                    unset($submenu['woocommerce'][$key]);
                 }
             }
         }
     }
     
-    public function restrict_admin_access() {
-        if (!current_user_can('location_manager')) {
+    public function show_orders_menu_for_location_manager() {
+        if (!$this->user_has_location_manager_role()) {
             return;
         }
         
-        // Get current page
+        global $menu, $submenu;
+        
+        // Показываем меню WooCommerce для менеджеров локаций
+        if (isset($menu['55.5'])) {
+            $menu['55.5'][1] = 'read'; // Изменяем требуемую capability
+        }
+        
+        // Обеспечиваем видимость Orders в подменю
+        if (isset($submenu['woocommerce'])) {
+            foreach ($submenu['woocommerce'] as $key => $item) {
+                // Проверяем и legacy orders, и HPOS
+                if (strpos($item[2], 'edit.php?post_type=shop_order') !== false || 
+                    strpos($item[2], 'admin.php?page=wc-orders') !== false ||
+                    strpos($item[2], 'wc-orders') !== false) {
+                    $submenu['woocommerce'][$key][1] = 'read';
+                }
+            }
+        }
+    }
+    
+    // Улучшенная функция restrict_admin_access
+    public function restrict_admin_access() {
+        if (!$this->user_has_location_manager_role()) {
+            return;
+        }
+        
         global $pagenow;
         $current_page = isset($_GET['page']) ? $_GET['page'] : '';
+        $post_type = isset($_GET['post_type']) ? $_GET['post_type'] : '';
+        $taxonomy = isset($_GET['taxonomy']) ? $_GET['taxonomy'] : '';
         
-        // Allowed pages for location manager
-        $allowed_pages = ['admin.php', 'profile.php'];
-        $allowed_post_types = ['shop_order'];
-        $allowed_wc_pages = ['wcmls-stock', 'wc-orders']; // Added wc-orders for HPOS
+        // Разрешенные страницы и типы постов
+        $allowed_pages = ['profile.php', 'admin-ajax.php', 'upload.php', 'media-new.php', 'async-upload.php'];
+        $allowed_admin_pages = ['wcmls-stock', 'wc-orders'];
+        $allowed_post_types = ['shop_order', 'product']; // Добавили product
+        $allowed_taxonomies = ['product_cat', 'product_tag', 'product_shipping_class'];
         
-        // Check if accessing WooCommerce pages
-        if ($pagenow === 'admin.php' && $current_page && !in_array($current_page, $allowed_wc_pages)) {
-            // Allow wc-orders page and its subpages
-            if (strpos($current_page, 'wc-orders') === 0) {
+        // Редирект с dashboard на товары
+        if ($pagenow === 'index.php') {
+            wp_redirect(admin_url('edit.php?post_type=product'));
+            exit;
+        }
+        
+        // Проверка доступа к admin.php страницам
+        if ($pagenow === 'admin.php' && $current_page) {
+            // Разрешаем wc-orders и все его подстраницы
+            if (strpos($current_page, 'wc-orders') === 0 || in_array($current_page, $allowed_admin_pages)) {
                 return;
             }
             
+            // Блокируем остальные WooCommerce страницы
             if (strpos($current_page, 'wc-') === 0 || strpos($current_page, 'woocommerce') !== false) {
                 wp_die(__('У вас нет прав для доступа к этой странице.', 'wc-multi-location-stock'));
             }
         }
         
-        // Block access to product pages, media library, and other restricted areas
+        // Проверка доступа к edit.php
         if ($pagenow === 'edit.php') {
-            $post_type = isset($_GET['post_type']) ? $_GET['post_type'] : 'post';
-            if (!in_array($post_type, $allowed_post_types)) {
+            $check_post_type = $post_type ?: 'post';
+            if (!in_array($check_post_type, $allowed_post_types)) {
                 wp_die(__('У вас нет прав для доступа к этой странице.', 'wc-multi-location-stock'));
             }
         }
         
+        // Проверка доступа к таксономиям
+        if ($pagenow === 'edit-tags.php' || $pagenow === 'term.php') {
+            if (!in_array($taxonomy, $allowed_taxonomies)) {
+                wp_die(__('У вас нет прав для доступа к этой странице.', 'wc-multi-location-stock'));
+            }
+        }
+        
+        // Проверка доступа к post.php и post-new.php
         if ($pagenow === 'post.php' || $pagenow === 'post-new.php') {
             $post_id = isset($_GET['post']) ? $_GET['post'] : 0;
-            $post_type = $post_id ? get_post_type($post_id) : (isset($_GET['post_type']) ? $_GET['post_type'] : '');
-            if (!in_array($post_type, $allowed_post_types)) {
+            $check_post_type = $post_id ? get_post_type($post_id) : $post_type;
+            
+            if ($check_post_type && !in_array($check_post_type, $allowed_post_types)) {
                 wp_die(__('У вас нет прав для доступа к этой странице.', 'wc-multi-location-stock'));
             }
         }
         
-        // Block access to media library
-        if ($pagenow === 'upload.php' || $pagenow === 'media-new.php') {
+        // Разрешаем медиатеку для загрузки изображений товаров
+        // Блокировка медиатеки удалена
+        
+        // Блокировка остальных системных страниц
+        $system_pages = ['themes.php', 'plugins.php', 'users.php', 'tools.php', 'options-general.php'];
+        if (in_array($pagenow, $system_pages)) {
             wp_die(__('У вас нет прав для доступа к этой странице.', 'wc-multi-location-stock'));
         }
-        
-        // Block access to dashboard
-        if ($pagenow === 'index.php') {
-            wp_redirect(admin_url('edit.php?post_type=shop_order'));
-            exit;
+    }
+    
+    // Вспомогательная функция для проверки роли
+    private function user_has_location_manager_role($user_id = null) {
+        if ($user_id === null) {
+            $user = wp_get_current_user();
+        } else {
+            $user = get_user_by('id', $user_id);
         }
         
-        // Hide admin menu items
-        add_action('admin_menu', function() {
-            if (!current_user_can('location_manager')) {
-                return;
+        if (!$user) {
+            return false;
+        }
+        
+        // Админы имеют полный доступ
+        if (in_array('administrator', $user->roles)) {
+            return false;
+        }
+        
+        return in_array('location_manager', $user->roles);
+    }
+    
+    // Фильтр для скрытия действий удаления в списке товаров
+    public function filter_product_row_actions($actions, $post) {
+        if ($this->user_has_location_manager_role() && $post->post_type === 'product') {
+            // Удаляем действие удаления
+            unset($actions['trash']);
+            unset($actions['delete']);
+        }
+        return $actions;
+    }
+    
+    // Фильтр для скрытия bulk actions удаления
+    public function filter_product_bulk_actions($actions) {
+        if ($this->user_has_location_manager_role()) {
+            unset($actions['trash']);
+            unset($actions['delete']);
+        }
+        return $actions;
+    }
+    
+    // CSS для скрытия элементов интерфейса
+    public function admin_custom_css() {
+        if (!$this->user_has_location_manager_role()) {
+            return;
+        }
+        ?>
+        <style>
+            /* Скрываем ненужные элементы для менеджера локации */
+            #wpadminbar #wp-admin-bar-comments,
+            #wpadminbar #wp-admin-bar-wp-logo,
+            #adminmenu #collapse-menu,
+            .woocommerce-layout__header-breadcrumbs {
+                display: none !important;
             }
             
-            // Remove main menu items
-            $restricted_menus = [
-                'index.php', 
-                'edit.php', // Posts
-                'upload.php', // Media
-                'edit.php?post_type=page', // Pages
-                'edit-comments.php', 
-                'themes.php', 
-                'plugins.php',
-                'users.php', 
-                'tools.php', 
-                'options-general.php',
-                'edit.php?post_type=product' // Products
-            ];
-            
-            foreach ($restricted_menus as $menu) {
-                remove_menu_page($menu);
+            /* Оставляем кнопку "Новый" в админ-баре но только для товаров */
+            #wpadminbar #wp-admin-bar-new-content > a:after {
+                content: " товар" !important;
+            }
+            #wpadminbar #wp-admin-bar-new-content .ab-submenu {
+                display: none !important;
             }
             
-            // Remove WooCommerce submenus except allowed ones
-            remove_submenu_page('woocommerce', 'wc-admin');
-            remove_submenu_page('woocommerce', 'wc-reports');
-            remove_submenu_page('woocommerce', 'wc-settings');
-            remove_submenu_page('woocommerce', 'wc-status');
-            remove_submenu_page('woocommerce', 'wc-addons');
-            remove_submenu_page('woocommerce', 'wcmls-settings');
-            
-            // Remove Products submenu from WooCommerce
-            remove_submenu_page('woocommerce', 'edit.php?post_type=product');
-            
-            // Keep only Orders and Stock for location managers
-            global $submenu;
-            if (isset($submenu['woocommerce'])) {
-                $allowed_submenus = ['edit.php?post_type=shop_order', 'wcmls-stock', 'wc-orders', 'admin.php?page=wc-orders'];
-                foreach ($submenu['woocommerce'] as $key => $item) {
-                    $is_allowed = false;
-                    foreach ($allowed_submenus as $allowed) {
-                        if (strpos($item[2], $allowed) !== false || strpos($item[2], 'wc-orders') !== false) {
-                            $is_allowed = true;
-                            break;
-                        }
-                    }
-                    if (!$is_allowed) {
-                        unset($submenu['woocommerce'][$key]);
-                    }
-                }
+            /* Скрываем кнопку удаления в редакторе товара */
+            .edit-post-header__settings .editor-post-trash,
+            #delete-action,
+            .submitbox #submitpost #delete-link {
+                display: none !important;
             }
-        }, 999);
+            
+            /* Скрываем ненужные meta boxes на странице заказа */
+            #postcustom,
+            #woocommerce-order-downloads,
+            #woocommerce-order-actions .order-action:not(.send-order-email) {
+                display: none !important;
+            }
+            
+            /* Скрываем опции удаления в медиатеке */
+            .media-modal .delete-attachment,
+            .attachment-details .delete-attachment,
+            .media-frame .delete-attachment {
+                display: none !important;
+            }
+            
+            /* Скрываем некоторые метабоксы товара для упрощения интерфейса */
+            #catalog-visibility,
+            #product_catdiv .taxonomy-add-new {
+                /* display: none !important; */ /* Раскомментируйте если нужно скрыть */
+            }
+        </style>
+        <?php
+    }
+    
+    // Изменение кнопки "Новый" в админ-баре
+    public function modify_admin_bar_new_button($wp_admin_bar) {
+        if (!$this->user_has_location_manager_role()) {
+            return;
+        }
+        
+        // Изменяем ссылку кнопки "Новый" чтобы вела на создание товара
+        $new_content_node = $wp_admin_bar->get_node('new-content');
+        if ($new_content_node) {
+            $new_content_node->href = admin_url('post-new.php?post_type=product');
+            $wp_admin_bar->add_node($new_content_node);
+        }
     }
     
     public function settings_page() {
@@ -498,7 +677,7 @@ class WC_Multi_Location_Stock {
             <div class="notice notice-info">
                 <p><?php _e('Шорткод для выбора локации:', 'wc-multi-location-stock'); ?> <code>[location_selector]</code></p>
                 <p><?php _e('Вставьте этот шорткод на любую страницу, где покупатели должны выбирать свою локацию.', 'wc-multi-location-stock'); ?></p>
-                <p><strong><?php _e('Новое в версии 2.0.1:', 'wc-multi-location-stock'); ?></strong> <?php _e('Исправлена проблема с бесконечной загрузкой jQuery на странице оформления заказа.', 'wc-multi-location-stock'); ?></p>
+                <p><strong><?php _e('Новое в версии 2.0.2:', 'wc-multi-location-stock'); ?></strong> <?php _e('Добавлен доступ к управлению товарами для менеджеров локаций.', 'wc-multi-location-stock'); ?></p>
             </div>
             
             <form method="post" action="">
@@ -877,7 +1056,7 @@ class WC_Multi_Location_Stock {
         }
         
         $current_user_id = get_current_user_id();
-        $is_location_manager = current_user_can('location_manager');
+        $is_location_manager = $this->user_has_location_manager_role();
         $is_admin = current_user_can('manage_woocommerce');
         $user_location = $this->get_user_location($current_user_id);
         
@@ -1297,7 +1476,7 @@ class WC_Multi_Location_Stock {
         }
         
         // Check if location manager can edit this location
-        if (current_user_can('location_manager') && !current_user_can('manage_woocommerce')) {
+        if ($this->user_has_location_manager_role() && !current_user_can('manage_woocommerce')) {
             $user_location = $this->get_user_location(get_current_user_id());
             if ($user_location !== $location_id) {
                 wp_send_json_error(__('Вы можете изменять запасы только для своей локации.', 'wc-multi-location-stock'));
@@ -2403,7 +2582,7 @@ class WC_Multi_Location_Stock {
             return;
         }
         
-        if (!current_user_can('location_manager')) {
+        if (!$this->user_has_location_manager_role()) {
             return;
         }
         
@@ -2450,7 +2629,7 @@ class WC_Multi_Location_Stock {
     }
     
     public function filter_order_views($views) {
-        if (current_user_can('location_manager')) {
+        if ($this->user_has_location_manager_role()) {
             // Remove some views for location managers
             unset($views['trash']);
         }
@@ -2458,7 +2637,7 @@ class WC_Multi_Location_Stock {
     }
     
     public function filter_hpos_orders_query($query_args) {
-        if (!current_user_can('location_manager')) {
+        if (!$this->user_has_location_manager_role()) {
             return $query_args;
         }
         
@@ -2586,5 +2765,34 @@ add_action('init', function() {
     
     // Always recreate the file to ensure it has the latest version
     file_put_contents($js_dir . 'frontend.js', $frontend_js);
+});
+
+// Temporary one-time update for existing location managers (can be removed after deployment)
+add_action('admin_init', function() {
+    if (get_option('wcmls_updated_location_manager_caps_v202') !== 'yes') {
+        $users = get_users(['role' => 'location_manager']);
+        foreach ($users as $user) {
+            $user->add_cap('edit_products');
+            $user->add_cap('edit_product');
+            $user->add_cap('read_product');
+            $user->add_cap('edit_others_products');
+            $user->add_cap('publish_products');
+            $user->add_cap('edit_published_products');
+            $user->add_cap('read_private_products');
+            $user->add_cap('upload_files');
+            $user->add_cap('manage_product_terms');
+            $user->add_cap('edit_product_terms');
+            $user->add_cap('assign_product_terms');
+            
+            // Ensure delete capabilities are removed
+            $user->remove_cap('delete_products');
+            $user->remove_cap('delete_product');
+            $user->remove_cap('delete_private_products');
+            $user->remove_cap('delete_published_products');
+            $user->remove_cap('delete_others_products');
+            $user->remove_cap('delete_product_terms');
+        }
+        update_option('wcmls_updated_location_manager_caps_v202', 'yes');
+    }
 });
 ?>
